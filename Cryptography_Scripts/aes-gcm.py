@@ -29,7 +29,7 @@ def generate_iv_string(length=16):
 
 enc_key = "1Xt5YfM4ZNuFdwp3OfVkwkhhQLagWKtt"  # 32-character secret key
 iv = generate_iv_string(12)  # make a random nonce/iv
-input = "This is a top secret message"
+input = input("Enter the message to encrypt: ")
 
 ciphertext = encrypt_with_aes(input, enc_key, iv) # base64 encoded data
 print("Ciphertext:", ciphertext)
