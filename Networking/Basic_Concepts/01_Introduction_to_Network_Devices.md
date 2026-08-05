@@ -318,7 +318,7 @@ Unlike hubs, switches intelligently forward frames only to the correct destinati
 
 Every network interface has a unique **MAC Address**.
 
-A switch builds a **MAC Address Table (CAM Table)**.
+A switch builds a **MAC Address Table (CAM-Conten Addressable Memory Table)**.
 
 Example
 
