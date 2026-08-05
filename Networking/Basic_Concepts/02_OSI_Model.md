@@ -5,7 +5,7 @@
 	- Computer data exists in the form of Bits.
 	- L1 Technologies: Wifi, Cables, Repeaters, Hubs.
 
-### L2 - Data Link : Hot to HO
+### L2 - Data Link : Hop to Hop
 	- Interacts with the wire ex. Physical Layer.
 	- NIC - Network Interface Cards / Wi-Fi Access Cards.
 	- Addressing scheme - MAC Addresses (48 bit), represented as 12 hex digits.
