@@ -15,6 +15,6 @@
 
 ### L3 - Network Layer : End to End
  	Addressing Scheme - IP Addresses
- 		|_ 32 bits, represented as 4 octects, each 0-255.
+ 						|_ 32 bits, represented as 4 octects, each 0-255.
  	- L3 Technologies: Routers, Hosts, (Anything with and IP address)
 
