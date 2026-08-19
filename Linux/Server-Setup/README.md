@@ -99,13 +99,13 @@ Physical Machine
 |---|---|---:|---|
 | Router | LAN | `192.168.0.1/24` | Physical network gateway |
 | CatchyOS | `wlan0` | `192.168.0.119/24` | Physical Linux host |
-| CatchyOS | `virbr0` | `10.10.10.1/24` | L1 libvirt gateway |
-| redinext | `enp1s0` | `10.10.1.10/24` | WAN/upstream side |
-| redinext | `virbr0` | `10.10.1.1/24` | Internal server gateway |
-| WEB01 | `enp1s0` | `10.10.2.10/24` | Web server |
-| FILE01 | `enp1s0` | `10.10.2.202/24` | Internal file server |
+| CatchyOS | `virbr2` | `10.10.10.1/24` | L1 libvirt gateway |
+| redinext | `br-lab` | `10.10.10.1/24` | WAN/upstream side |
+| redinext | `br-lab` | `10.10.10.10/24` | Internal server gateway |
+| WEB01 | `enp1s0` | `10.10.10.20/24` | Web server |
+| DB01 | `enp1s0` | `10.10.10.30/24` | Internal file server |
 
-> `FILE01` was part of the planned architecture. WEB01 was the first workload successfully installed and tested.
+> `DB01` was part of the planned architecture. WEB01 was the first workload successfully installed and tested.
 
 ---
 
