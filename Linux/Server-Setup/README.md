@@ -105,13 +105,13 @@ Physical Machine
 | WEB01 | `enp1s0` | `10.10.10.20/24` | Web server |
 | DB01 | `enp1s0` | `10.10.10.30/24` | Internal file server |
 
-> `DB01` was part of the planned architecture. WEB01 was the first workload successfully installed and tested.
+> `DB01` was part of the planned architecture. `WEB01` was the first workload successfully installed and tested.
 
 ---
 
 # 3. Why This Architecture
 
-The lab deliberately separates three layers.
+The lab deliberately separates 2 layers.
 
 ## Layer 0 — Physical host
 
