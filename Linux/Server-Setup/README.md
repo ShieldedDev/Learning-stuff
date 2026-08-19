@@ -89,7 +89,7 @@ The important point is that the `10.10.10.0/24` network is intentionally carried
                     │ 192.168.0.119     │
                     │                   │
                     │ KVM + QEMU        │
-                    │ libvirt            │
+                    │ libvirt           │
                     └─────────┬─────────┘
                               │
                     libvirt network: labnet
@@ -114,7 +114,7 @@ The important point is that the `10.10.10.0/24` network is intentionally carried
                     │  10.10.10.10/24   │
                     │                   │
                     │ KVM + QEMU        │
-                    │ libvirt            │
+                    │ libvirt           │
                     └─────────┬─────────┘
                               │
                        br-lab L2 bridge
@@ -124,8 +124,8 @@ The important point is that the `10.10.10.0/24` network is intentionally carried
                ┌────▼─────┐       ┌────▼─────┐
                │  web01   │       │   db01   │
                │ Ubuntu   │       │ Ubuntu   │
-               │ .10.10.20│      │ .10.10.30│
-               └───────────┘       └──────────┘
+               │ .10.10.20│       │ .10.10.30│
+               └──────────┘       └──────────┘
 ```
 
 There are therefore **two different bridge devices with different jobs**:
