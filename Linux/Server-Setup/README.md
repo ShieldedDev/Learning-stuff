@@ -13,15 +13,13 @@ It is intentionally written as a learning and operations guide rather than a lis
 - how to verify it,
 - and what commonly goes wrong.
 
-The architecture was simplified during development. The earlier design used multiple nested NAT networks and DNAT/port-forwarding rules. Those pieces are **not part of the current design**. The final lab uses one shared `10.10.10.0/24` Layer-2 segment for `redinext`, `web01`, and `db01`.
+The final network design uses an outer libvirt network on the physical CachyOS host and an inner Linux bridge on `redinext`. This keeps the lab simple while still giving the nested VMs a shared Layer-2 network.
 
 ---
 
 # 1. What We Are Building
 
 The lab uses **nested virtualization**.
-
-There are two virtualization layers:
 
 ```text
 Physical laptop
@@ -46,17 +44,7 @@ The physical machine is the **L0 host**.
 
 `web01` and `db01` are **L2 workload VMs**.
 
-This gives us a small environment that resembles the separation found in real infrastructure:
-
-```text
-Hypervisor / Infrastructure
-        │
-        ├── Web workload
-        │
-        └── Database / internal workload
-```
-
-The lab is suitable for learning:
+The environment is suitable for learning:
 
 - Linux administration
 - virtualization
@@ -77,150 +65,260 @@ The lab is suitable for learning:
 
 # 2. Final Architecture
 
+The final design has **two virtualization/networking layers**.
+
+The physical CachyOS host provides the **outer lab network**.
+
+`redinext` then provides the **inner VM bridge**.
+
+The important point is that the `10.10.10.0/24` network is intentionally carried from the physical host's libvirt network into `redinext`, and then through `br-lab` to `web01` and `db01`.
+
 ## 2.1 Physical Layer
 
-The physical machine runs CachyOS.
-
 ```text
-                    Home/Lab Router
-                       192.168.0.1
-                            │
-                         Wi-Fi
-                            │
-                    ┌───────▼────────┐
-                    │    CachyOS     │
-                    │ Physical Host  │
-                    │                │
-                    │ wlan0          │
-                    │ 192.168.0.119  │
-                    │                │
-                    │ KVM + libvirt  │
-                    └───────┬────────┘
-                            │
-                     Lab uplink network
-                      10.10.10.0/24
-                            │
-                    10.10.10.1
-                            │
-                    ┌───────▼────────┐
-                    │    redinext    │
-                    │ Ubuntu Server   │
-                    │                │
-                    │ br-lab         │
-                    │ 10.10.10.10    │
-                    │                │
-                    │ KVM + libvirt  │
-                    └───────┬────────┘
-                            │
-                    ┌───────┴────────┐
-                    │  br-lab        │
-                    │ 10.10.10.0/24 │
-                    └───────┬────────┘
-                            │
-                ┌───────────┴───────────┐
-                │                       │
-         ┌──────▼──────┐        ┌──────▼──────┐
-         │    web01    │        │    db01     │
-         │ Ubuntu      │        │ Ubuntu      │
-         │ 10.10.10.20 │        │ 10.10.10.30 │
-         └─────────────┘        └─────────────┘
+                         Home Router
+                         192.168.0.1
+                              │
+                            Wi-Fi
+                              │
+                    ┌─────────▼─────────┐
+                    │      CachyOS      │
+                    │   Physical Host   │
+                    │                   │
+                    │ wlan0             │
+                    │ 192.168.0.119     │
+                    │                   │
+                    │ KVM + QEMU        │
+                    │ libvirt            │
+                    └─────────┬─────────┘
+                              │
+                    libvirt network: labnet
+                              │
+                       ┌──────▼──────┐
+                       │   virbr2    │
+                       │ 10.10.10.1  │
+                       │   gateway   │
+                       └──────┬──────┘
+                              │
+                         vnet3 on
+                         CachyOS
+                              │
+                    ┌─────────▼─────────┐
+                    │     redinext      │
+                    │   Ubuntu Server   │
+                    │                   │
+                    │ enp7s0            │
+                    │       │           │
+                    │       ▼           │
+                    │     br-lab        │
+                    │  10.10.10.10/24   │
+                    │                   │
+                    │ KVM + QEMU        │
+                    │ libvirt            │
+                    └─────────┬─────────┘
+                              │
+                       br-lab L2 bridge
+                              │
+                    ┌─────────┴─────────┐
+                    │                   │
+               ┌────▼─────┐       ┌────▼─────┐
+               │  web01   │       │   db01   │
+               │ Ubuntu   │       │ Ubuntu   │
+               │ .10.10.20│      │ .10.10.30│
+               └───────────┘       └──────────┘
 ```
 
-## 2.2 Address Plan
+There are therefore **two different bridge devices with different jobs**:
 
-| System | Interface | Address | Purpose |
-|---|---|---|---|
-| Home/Lab Router | LAN | `192.168.0.1/24` | Internet gateway |
-| CachyOS | `wlan0` | `192.168.0.119/24` | Physical host |
-| Lab gateway on physical host | libvirt bridge/network | `10.10.10.1/24` | Uplink to `redinext` |
-| redinext | `br-lab` | `10.10.10.10/24` | L1 hypervisor/server |
-| web01 | `enp1s0` | `10.10.10.20/24` | Web workload |
-| db01 | `enp1s0` | `10.10.10.30/24` | Internal workload |
+| Device | Where | Address | Purpose |
+|---|---|---:|---|
+| `virbr0` | CachyOS | `192.168.122.1/24` | libvirt default network; not part of our lab path |
+| `virbr2` | CachyOS | `10.10.10.1/24` | `labnet` gateway/uplink for the nested lab |
+| `br-lab` | redinext | `10.10.10.10/24` | Inner bridge connecting `redinext`, `web01`, and `db01` |
 
-The exact physical-host bridge name may be different on another installation. In this lab, the important contract is:
+> **Important:** `virbr2` and `br-lab` are not the same Linux bridge. They are connected through `redinext`'s virtual NIC. `virbr2` is the outer libvirt network; `br-lab` is the inner bridge.
+
+## 2.2 The Two NICs of redinext
+
+In the completed setup, `redinext` can have two virtual NICs on the CachyOS host.
+
+Check them with:
+
+```bash
+sudo virsh domiflist redinext
+```
+
+The relevant result looks conceptually like:
 
 ```text
-Lab network: 10.10.10.0/24
-Gateway:     10.10.10.1
-redinext:    10.10.10.10
-web01:       10.10.10.20
-db01:        10.10.10.30
+Interface  Type     Source   Model   MAC
+vnet2      network  default  virtio  <MAC>
+vnet3      network  labnet  virtio  <MAC>
+```
+
+The corresponding guest-side interfaces are typically:
+
+```text
+redinext
+├── enp1s0 → default libvirt network
+│            192.168.122.0/24
+│
+└── enp7s0 → labnet
+             10.10.10.0/24
+             │
+             ▼
+           br-lab
+```
+
+The exact interface names can vary. Always verify with:
+
+```bash
+ip -br addr
+```
+
+and:
+
+```bash
+sudo virsh domiflist redinext
+```
+
+The **lab path** is the important one:
+
+```text
+CachyOS virbr2
+      │
+   vnet3
+      │
+redinext enp7s0
+      │
+   br-lab
+      │
+ ┌────┴────┐
+web01    db01
+.20        .30
+```
+
+## 2.3 Address Plan
+
+| System | Interface / Device | Address | Purpose |
+|---|---|---:|---|
+| Home Router | LAN | `192.168.0.1/24` | Internet gateway |
+| CachyOS | `wlan0` | `192.168.0.119/24` | Physical host |
+| CachyOS | `virbr0` | `192.168.122.1/24` | libvirt default network |
+| CachyOS | `virbr2` | `10.10.10.1/24` | `labnet` gateway |
+| redinext | `br-lab` | `10.10.10.10/24` | L1 server/hypervisor |
+| web01 | `enp1s0` | `10.10.10.20/24` | Web workload |
+| db01 | `enp1s0` | `10.10.10.30/24` | Database/internal workload |
+
+The critical lab addressing is:
+
+```text
+Network:  10.10.10.0/24
+Gateway:  10.10.10.1
+redinext: 10.10.10.10
+web01:    10.10.10.20
+db01:     10.10.10.30
 ```
 
 ---
 
 # 3. Why We Changed the Original Network Design
 
-The first version of the lab used several independent networks and NAT/DNAT layers.
+The original design became unnecessarily complicated because we introduced multiple internal virtual networks and DNAT/port-forwarding rules.
 
-Conceptually, it looked like:
+The final design separates two requirements:
 
-```text
-Physical LAN
-    │
-    ▼
-CatchyOS NAT
-    │
-    ▼
-redinext NAT
-    │
-    ▼
-VM network
-```
+1. **Outer connectivity:** give the nested lab access to the physical host's network/Internet.
+2. **Inner connectivity:** put `redinext`, `web01`, and `db01` on the same `10.10.10.0/24` Layer-2 segment.
 
-That design introduced unnecessary routing and troubleshooting complexity.
+We solve those requirements with two layers.
 
-For example, traffic could pass through:
+## Outer layer — CachyOS
+
+CachyOS runs a libvirt network named:
 
 ```text
-Client
-  ↓
-CatchyOS
-  ↓
-DNAT
-  ↓
-redinext
-  ↓
-DNAT
-  ↓
-VM
+labnet
 ```
 
-This made it harder to answer a simple question:
-
-> "Can these three servers communicate with each other?"
-
-The final design deliberately removes that complexity.
-
-All three systems share:
+with:
 
 ```text
-10.10.10.0/24
+virbr2 = 10.10.10.1/24
 ```
 
-and are attached to the same Linux bridge:
+This network provides the gateway and NAT toward the physical host's Wi-Fi connection.
+
+The path is:
+
+```text
+web01/db01
+    │
+    ▼
+10.10.10.1
+    │
+  virbr2
+    │
+libvirt NAT
+    │
+  CachyOS
+    │
+  wlan0
+    │
+Internet
+```
+
+## Inner layer — redinext
+
+`redinext` receives a virtual NIC from `labnet`.
+
+Inside `redinext`, that NIC is attached to:
 
 ```text
 br-lab
 ```
 
-The result is:
+The inner VMs also attach to `br-lab`.
+
+Therefore:
 
 ```text
-redinext  ─┐
-web01     ─┼── br-lab ── 10.10.10.0/24
-db01      ─┘
+                10.10.10.0/24
+                      │
+                 ┌────┴────┐
+                 │ br-lab  │
+                 └────┬────┘
+                      │
+          ┌───────────┼───────────┐
+          │           │           │
+      redinext       web01       db01
+       .10            .20         .30
 ```
 
-No DNAT is required for communication between these systems.
+The three systems can communicate directly at Layer 2.
 
-No second internal NAT network is required.
+## What we removed
 
-No manual port-forwarding is required.
+We do **not** use:
 
-This is much easier to understand and troubleshoot.
+- DNAT for access between the lab systems
+- a second internal NAT network inside `redinext`
+- manual port-forwarding for normal lab communication
+- separate subnets for `web01` and `db01`
 
-> **Networking principle:** solve the simplest network problem that satisfies the requirement. Add routing, NAT, or DNAT only when the architecture actually requires it.
+## What we still use
+
+We **do still use one NAT boundary**:
+
+```text
+CachyOS labnet/virbr2
+```
+
+That NAT is only the **outer Internet/uplink boundary**.
+
+It is not an internal VM-to-VM NAT design.
+
+> **Important terminology:** "No DNAT" does not mean "no NAT anywhere." The final design uses the standard libvirt NAT behavior on the outer `labnet` network, while the workload VMs share a simple Layer-2 network behind it.
 
 ---
 
@@ -263,146 +361,184 @@ This distinction is critical.
 
 # 5. Layer 0 — Prepare the Physical CachyOS Host
 
-The physical host is responsible for:
+The physical host is the foundation of the entire environment.
 
-- CPU virtualization
+It runs:
+
+- CachyOS Linux
 - KVM
 - QEMU
 - libvirt
-- the outer virtual network
-- running the `redinext` VM
+- the outer `labnet` network
 
-The physical host should **not** be treated as one of the workload servers.
+Check the host:
+
+```bash
+cat /etc/os-release
+uname -r
+```
+
+Check networking:
+
+```bash
+ip -br addr
+ip route
+```
+
+For example:
+
+```text
+wlan0    UP    192.168.0.119/24
+```
+
+Verify Internet access before changing virtualization networking:
+
+```bash
+ping -c 3 1.1.1.1
+ping -c 3 google.com
+```
+
+Do not begin virtualization troubleshooting until the physical host itself has working connectivity.
 
 ---
 
 # 6. Verify Hardware Virtualization
 
-Check the CPU:
+Check CPU virtualization support:
 
 ```bash
-lscpu | grep -E 'Model name|Virtualization'
+lscpu | grep -i virtualization
 ```
-
-On Intel hardware, expect something similar to:
-
-```text
-Virtualization: VT-x
-```
-
-On AMD hardware, the virtualization extension will be different.
 
 Also check:
+
+```bash
+grep -E 'vmx|svm' /proc/cpuinfo | head
+```
+
+Intel systems normally expose:
+
+```text
+vmx
+```
+
+AMD systems normally expose:
+
+```text
+svm
+```
+
+Check KVM:
 
 ```bash
 ls -l /dev/kvm
 ```
 
-Expected:
-
-```text
-crw-rw---- ... /dev/kvm
-```
-
-The exact permissions may vary.
-
-Check loaded KVM modules:
-
-```bash
-lsmod | grep kvm
-```
-
-On Intel:
-
-```text
-kvm_intel
-kvm
-```
-
-On AMD:
-
-```text
-kvm_amd
-kvm
-```
+A working system should expose `/dev/kvm`.
 
 ## Why `/dev/kvm` matters
 
-KVM is a Linux kernel virtualization facility.
+`/dev/kvm` is the interface used by user-space virtualization software to communicate with the Linux KVM subsystem.
 
-QEMU can run as a software emulator, but when QEMU uses KVM it can execute guest CPU instructions using hardware-assisted virtualization.
-
-Conceptually:
+The simplified model is:
 
 ```text
-Guest OS
-   │
 QEMU
-   │
-KVM kernel interface
-   │
+  │
+  ▼
+/dev/kvm
+  │
+  ▼
+Linux KVM
+  │
+  ▼
 CPU virtualization extensions
-   │
-Physical CPU
 ```
-
-Without KVM acceleration, virtualization can be dramatically slower.
 
 ---
 
 # 7. Install KVM/libvirt on CachyOS
 
-CachyOS is Arch-based, so package names follow the Arch ecosystem.
+Install the required virtualization packages using the current CachyOS/Arch package names.
 
-A practical package set is:
+The exact package set can change with distribution versions, so verify package availability with:
+
+```bash
+pacman -Ss qemu
+pacman -Ss libvirt
+```
+
+The core components are:
+
+```text
+QEMU
+libvirt
+virt-install
+virt-viewer
+```
+
+Typical installation:
 
 ```bash
 sudo pacman -Syu
-sudo pacman -S qemu-desktop libvirt virt-install virt-manager edk2-ovmf dnsmasq
+sudo pacman -S qemu-desktop libvirt virt-install virt-viewer
+```
+
+Check versions:
+
+```bash
+qemu-system-x86_64 --version
+virsh version
+virt-install --version
 ```
 
 ## What these packages do
 
-| Package | Purpose |
-|---|---|
-| `qemu-desktop` | QEMU virtualization/emulation components |
-| `libvirt` | Virtualization management framework |
-| `virt-install` | CLI tool for creating VMs |
-| `virt-manager` | GUI management client |
-| `edk2-ovmf` | UEFI firmware for VMs |
-| `dnsmasq` | DHCP/DNS support used by libvirt networking |
+### QEMU
 
-The exact package set can change as Arch-based distributions evolve. Verify package names against the distribution's current repositories before installation.
+Provides the virtual machine/device model.
+
+### libvirt
+
+Provides the management API and infrastructure for defining and controlling VMs, networks and storage.
+
+### virt-install
+
+Creates/provisions libvirt-managed virtual machines.
+
+### virt-viewer
+
+Provides a graphical console client for VM displays.
 
 ---
 
 # 8. Enable libvirt
 
-Enable and start the service:
+Enable the libvirt services appropriate for the installed version.
+
+First inspect:
+
+```bash
+systemctl list-unit-files | grep -E 'libvirt|virtqemud|virtnetworkd'
+```
+
+Then enable the relevant service(s).
+
+On systems using the traditional daemon:
 
 ```bash
 sudo systemctl enable --now libvirtd
 ```
 
-Check:
+Verify:
 
 ```bash
 systemctl status libvirtd --no-pager
 ```
 
-Verify that `virsh` exists:
+On modular libvirt installations, services such as `virtqemud` and `virtnetworkd` may be used instead.
 
-```bash
-virsh --version
-```
-
-If you get:
-
-```text
-command not found
-```
-
-the libvirt client tooling is not installed or is not in the current environment.
+The important thing is to verify the active libvirt stack rather than assuming one daemon name.
 
 ---
 
@@ -423,9 +559,7 @@ Verify:
 groups
 ```
 
-You should see the relevant groups.
-
-> Group membership changes do not always affect the current shell immediately. A new login session is the safest way to verify them.
+Group membership changes do not always affect the current shell immediately. A new login session is the safest way to verify them.
 
 ---
 
@@ -452,79 +586,110 @@ Do not proceed to complex VM creation if the virtualization layer itself is brok
 
 # 11. Create the Outer Lab Network
 
-The physical host needs to provide a virtual network through which `redinext` can communicate with the rest of the lab.
+The physical CachyOS host provides the **outer network** for the nested infrastructure.
 
-The important network is:
+This is where the `10.10.10.0/24` network actually begins.
+
+We created a libvirt network named:
 
 ```text
-10.10.10.0/24
+labnet
+```
+
+and assigned it the Linux bridge:
+
+```text
+virbr2
 ```
 
 with:
 
 ```text
-10.10.10.1
+10.10.10.1/24
 ```
 
-as the lab gateway.
+The exact bridge number is not important in general. On this installation it is `virbr2`.
 
-The exact libvirt network name and bridge name are implementation details.
+## 11.1 Understand `virbr0` vs `virbr2`
 
-Check existing networks:
+After libvirt is installed, you may already have a default network:
+
+```text
+default
+   │
+virbr0
+   │
+192.168.122.1/24
+```
+
+This is the standard libvirt NAT network.
+
+Our lab network is separate:
+
+```text
+labnet
+   │
+virbr2
+   │
+10.10.10.1/24
+```
+
+The two networks serve different purposes.
+
+| Network | Bridge | Subnet | Role |
+|---|---|---|---|
+| `default` | `virbr0` | `192.168.122.0/24` | Default libvirt network |
+| `labnet` | `virbr2` | `10.10.10.0/24` | Our nested infrastructure network |
+
+Do not confuse:
+
+```text
+virbr0 ≠ virbr2
+```
+
+and do not assume the bridge number will be the same on another host.
+
+## 11.2 Verify the network on CachyOS
+
+List libvirt networks:
 
 ```bash
 sudo virsh net-list --all
 ```
 
-Inspect a network:
+Inspect the lab network:
 
 ```bash
-sudo virsh net-dumpxml <network-name>
+sudo virsh net-info labnet
 ```
 
-Check the host:
+Dump its configuration:
 
 ```bash
-ip -br addr
-ip route
+sudo virsh net-dumpxml labnet
 ```
 
-You should be able to identify:
+Inspect the bridge directly:
+
+```bash
+ip -br addr show virbr2
+```
+
+Expected:
 
 ```text
-Physical Wi-Fi:
-192.168.0.x/24
-
-Lab network:
-10.10.10.0/24
+virbr2    UP    10.10.10.1/24
 ```
 
-## Why use a separate lab subnet?
+The exact MAC address and other flags are not important for the basic design.
 
-It gives us a deterministic network boundary:
+## 11.3 Example `labnet` configuration
 
-```text
-Home network
-192.168.0.0/24
-
-        │
-
-Lab network
-10.10.10.0/24
-```
-
-This keeps the infrastructure lab logically separate from the normal home LAN.
-
----
-
-
-## 11.1 Example outer libvirt network
-
-A simple outer NAT network can be defined on CachyOS as:
+A representative libvirt configuration is:
 
 ```xml
 <network>
-  <name>lab-uplink</name>
+  <name>labnet</name>
 
   <forward mode='nat'/>
 
@@ -538,90 +703,71 @@ A simple outer NAT network can be defined on CachyOS as:
 </network>
 ```
 
-Save this as:
+The actual persistent XML on your machine is authoritative. Inspect it with:
+
+```bash
+sudo virsh net-dumpxml labnet
+```
+
+Do not blindly replace an existing network definition simply because the bridge is named differently.
+
+## 11.4 Why `virbr2` is the gateway
+
+The address:
 
 ```text
-lab-uplink.xml
-```
-
-Define it:
-
-```bash
-sudo virsh net-define lab-uplink.xml
-```
-
-Start it:
-
-```bash
-sudo virsh net-start lab-uplink
-```
-
-Enable it at boot:
-
-```bash
-sudo virsh net-autostart lab-uplink
-```
-
-Verify:
-
-```bash
-sudo virsh net-list --all
-```
-
-Then:
-
-```bash
-ip -br addr
-```
-
-You should have a bridge associated with the lab network, for example:
-
-```text
-virbr2    UP    10.10.10.1/24
-```
-
-The bridge name does not have to be `virbr2`. If it already exists, choose another unused name.
-
-### Why the outer network uses NAT
-
-The physical host is connected through Wi-Fi. Instead of trying to transparently bridge arbitrary VM MAC addresses onto the Wi-Fi station interface, the outer libvirt network provides a normal virtual Ethernet network and performs NAT toward the physical host's Internet connection.
-
-The important path is:
-
-```text
-redinext
-   │
-   ▼
-10.10.10.0/24
-   │
 10.10.10.1
-   │
-outer libvirt NAT
-   │
-CachyOS
-   │
-wlan0
-   │
-Internet
 ```
 
-This NAT is **not** the old VM-to-VM NAT design. It is only the outer uplink that gives the lab Internet access.
+belongs to the outer libvirt network.
 
-The nested workload network remains a single shared Layer-2 segment.
+It is therefore the default gateway used by systems that need to leave the `10.10.10.0/24` lab network.
 
-### Attach redinext to the outer network
-
-When creating `redinext`, attach one of its virtual NICs to:
+For example:
 
 ```text
-lab-uplink
+web01
+10.10.10.20
+      │
+      │ default route
+      ▼
+10.10.10.1
+      │
+    virbr2
+      │
+   NAT/uplink
+      │
+   CachyOS
+      │
+    wlan0
+      │
+   Internet
 ```
 
-Check from CachyOS:
+This is why `web01` and `db01` can use:
+
+```text
+default via 10.10.10.1
+```
+
+without making `redinext` a router.
+
+## 11.5 Attach redinext to `labnet`
+
+On CachyOS:
 
 ```bash
 sudo virsh domiflist redinext
 ```
+
+The lab interface should appear conceptually as:
+
+```text
+Interface  Type     Source  Model
+vnet3      network  labnet  virtio
+```
+
+The `vnet3` number is not guaranteed. It is simply the host-side interface created for that VM NIC.
 
 Inside `redinext`, identify the corresponding interface:
 
@@ -629,26 +775,102 @@ Inside `redinext`, identify the corresponding interface:
 ip -br addr
 ```
 
-In this lab it became:
+In our installation it became:
 
 ```text
 enp7s0
 ```
 
-Initially it may receive an address from DHCP, such as:
+That interface is then placed into the inner bridge:
 
 ```text
-10.10.10.178/24
+enp7s0
+   │
+   ▼
+br-lab
 ```
 
-After the inner bridge is configured, the host address moves to:
+The resulting path is:
 
 ```text
-br-lab = 10.10.10.10/24
+CachyOS
+   │
+virbr2 / labnet
+10.10.10.1
+   │
+vnet3
+   │
+redinext enp7s0
+   │
+br-lab
+10.10.10.10
+   │
+ ┌─┴─────────┐
+web01       db01
+.20          .30
 ```
 
-and `enp7s0` becomes the bridge member.
+## 11.6 Why the outer network uses NAT
 
+The physical host connects to the Internet through Wi-Fi.
+
+The outer libvirt network provides a controlled virtual Ethernet network and performs NAT toward the host's uplink.
+
+This avoids trying to transparently bridge arbitrary guest MAC addresses directly through the Wi-Fi station interface.
+
+The outer NAT boundary is therefore intentional:
+
+```text
+10.10.10.0/24
+       │
+    virbr2
+       │
+     NAT
+       │
+CachyOS wlan0
+       │
+   192.168.0.0/24
+       │
+   Home router
+```
+
+This is the only NAT boundary required for the current architecture.
+
+## 11.7 Verify the complete outer path
+
+On CachyOS:
+
+```bash
+ip -br addr show virbr2
+```
+
+```bash
+sudo virsh domiflist redinext
+```
+
+```bash
+ping -c 3 10.10.10.1
+```
+
+Then from `redinext`:
+
+```bash
+ip -br addr
+```
+
+```bash
+ping -c 3 10.10.10.1
+```
+
+Then:
+
+```bash
+ping -c 3 1.1.1.1
+```
+
+If these work, the outer network is functioning before the inner VMs are introduced.
+
+---
 
 # 12. Create the redinext VM
 
@@ -661,7 +883,7 @@ A reasonable starting allocation on a 16 GB physical machine is:
 | vCPU | 4 |
 | RAM | 6–8 GB |
 | OS disk | 50–60 GB |
-| Network | lab/uplink network |
+| Network | `labnet` |
 | Firmware | UEFI or BIOS |
 
 Do not allocate all physical RAM to the hypervisor VM.
@@ -696,8 +918,6 @@ Install:
 ```text
 OpenSSH Server
 ```
-
-SSH is important because a server should not depend on a graphical desktop for normal administration.
 
 After installation:
 
@@ -748,72 +968,35 @@ A GUI is useful for occasional console access, but it should not be a dependency
 
 # 15. Enable Nested KVM in redinext
 
-Because `redinext` itself is a VM, it must be able to use virtualization extensions.
+Because `redinext` itself is a VM, it must be able to use virtualization extensions exposed by the outer hypervisor.
+
+On CachyOS, inspect the VM CPU configuration:
+
+```bash
+sudo virsh dumpxml redinext | grep -A8 '<cpu'
+```
 
 Inside `redinext`:
 
 ```bash
-lscpu | grep -E 'Model name|Virtualization'
+lscpu | grep -i virtualization
 ```
 
-Check for Intel VMX:
-
-```bash
-grep -oE 'vmx' /proc/cpuinfo | head
-```
-
-Check KVM:
+Check:
 
 ```bash
 ls -l /dev/kvm
-lsmod | grep kvm
 ```
 
-For Intel nested virtualization:
-
-```bash
-cat /sys/module/kvm_intel/parameters/nested
-```
-
-Expected:
-
-```text
-Y
-```
-
-For AMD, use the corresponding `kvm_amd` module parameter.
-
-## Why this checkpoint matters
-
-The virtualization stack is:
-
-```text
-Physical CPU
-   ↓
-CachyOS
-   ↓
-KVM
-   ↓
-QEMU
-   ↓
-redinext
-   ↓
-KVM
-   ↓
-QEMU
-   ↓
-web01/db01
-```
-
-Every layer must work.
-
-A nested VM may appear to boot while still having a broken or unstable nested KVM configuration.
+A working nested setup should expose `/dev/kvm` inside `redinext`.
 
 ---
 
 # 16. Install KVM/libvirt on redinext
 
-On Ubuntu:
+Install the virtualization stack inside Ubuntu Server.
+
+Typical packages include:
 
 ```bash
 sudo apt update
@@ -822,249 +1005,194 @@ sudo apt install -y \
     libvirt-daemon-system \
     libvirt-clients \
     virtinst \
-    dnsmasq-base
+    bridge-utils
 ```
 
-Optional GUI/console tooling:
+Depending on the Ubuntu release and intended workflow, additional packages may be useful, such as:
 
 ```bash
-sudo apt install -y virt-viewer
+virt-viewer
 ```
 
 Check:
 
 ```bash
-systemctl status libvirtd --no-pager
+virsh version
+virt-install --version
+qemu-system-x86_64 --version
 ```
-
-Verify:
-
-```bash
-virsh --version
-```
-
-Add the administration user:
-
-```bash
-sudo adduser "$USER" libvirt
-sudo adduser "$USER" kvm
-```
-
-Log out and back in.
-
-Then:
-
-```bash
-groups
-```
-
----
 
 ## 16.1 Package Reference
 
-The following packages are used in the completed lab.
+### `qemu-kvm`
 
-| Package | Layer | Why it is installed |
-|---|---|---|
-| `qemu-kvm` | Virtualization | QEMU with KVM acceleration for running VMs |
-| `libvirt-daemon-system` | Virtualization | System libvirt daemon and integration |
-| `libvirt-clients` | Virtualization | Client tools such as `virsh` |
-| `virtinst` | Virtualization | `virt-install` and related CLI provisioning tools |
-| `cpu-checker` | Diagnostics | Provides `kvm-ok` on Ubuntu |
-| `dnsmasq-base` | Networking | Support components used by libvirt networking |
-| `virt-viewer` | Management | Graphical VM console viewer |
-| `cockpit` | Management | Web-based Linux administration interface |
-| `cockpit-machines` | Management | Cockpit integration for libvirt/QEMU VMs |
-| `openssh-server` | Remote administration | Provides the `sshd` service |
-| `nginx` | Web workload | HTTP/HTTPS web server |
-| `ufw` | Host firewall | Simplified firewall management interface |
-| `netplan` | Networking | Declarative Ubuntu network configuration layer |
+Provides QEMU with KVM acceleration support.
 
-Most Ubuntu Server installations already include Netplan and the basic `iproute2` networking tools.
+### `libvirt-daemon-system`
 
-### Why we do not install everything
+Provides system-level libvirt services.
 
-A production-style server should follow the principle of **minimum necessary software**.
+### `libvirt-clients`
 
-For example:
-
-```text
-redinext:
-    virtualization + management + SSH
-
-web01:
-    Nginx + SSH
-
-db01:
-    only the services required by its role
-```
-
-Installing a graphical desktop, database server, VNC server, file server, and development toolchain on every machine would increase the attack surface and make the architecture harder to understand.
-
-# 17. Understand the Virtualization Stack
-
-The packages are not interchangeable.
-
-## KVM
-
-KVM is the kernel-level virtualization mechanism.
-
-```text
-Linux kernel
-└── KVM
-```
-
-It provides hardware-assisted virtualization.
-
-## QEMU
-
-QEMU is the userspace virtual machine emulator/virtualizer.
-
-```text
-QEMU
-├── virtual CPU
-├── virtual memory
-├── virtual disks
-├── virtual NIC
-└── virtual display
-```
-
-When QEMU uses KVM, CPU virtualization is accelerated.
-
-## libvirt
-
-libvirt is the management layer.
-
-Instead of manually running long QEMU commands, administrators can use:
+Provides tools such as:
 
 ```bash
 virsh
 ```
 
-and libvirt manages the VM definition and lifecycle.
+### `virtinst`
 
-The relationship is:
+Provides:
 
-```text
-virsh / virt-install / Cockpit / virt-manager
-                    │
-                 libvirt
-                    │
-                  QEMU
-                    │
-                   KVM
-                    │
-                 Linux
+```bash
+virt-install
 ```
 
-This separation is fundamental to understanding the lab.
+### `bridge-utils`
+
+Provides traditional bridge utilities. Modern Linux administration can also use `ip` and `bridge` directly.
+
+> Do not install packages simply because they appear in a tutorial. Install the smallest set required for the architecture and verify what each package provides.
+
+---
+
+# 17. Understand the Virtualization Stack
+
+The architecture is:
+
+```text
+Management tools
+       │
+       ▼
+     libvirt
+       │
+       ▼
+      QEMU
+       │
+       ▼
+      KVM
+       │
+       ▼
+CPU virtualization hardware
+```
+
+### KVM
+
+Kernel subsystem that provides hardware-assisted virtualization.
+
+### QEMU
+
+User-space virtual machine monitor and device model.
+
+### libvirt
+
+Management API/framework.
+
+### virsh
+
+CLI client for libvirt.
+
+### virt-install
+
+VM provisioning tool.
+
+This separation matters when troubleshooting.
 
 ---
 
 # 18. Validate KVM on redinext
 
-Install the diagnostic tool:
-
-```bash
-sudo apt install -y cpu-checker
-```
-
-Then:
-
-```bash
-kvm-ok
-```
-
-A successful result should indicate that KVM acceleration can be used.
-
-Also run:
+Run:
 
 ```bash
 sudo virt-host-validate qemu
 ```
 
-If this fails, stop here and troubleshoot the virtualization layer before creating nested VMs.
+Then:
+
+```bash
+ls -l /dev/kvm
+```
+
+Then:
+
+```bash
+lsmod | grep kvm
+```
+
+You should see the relevant KVM modules.
+
+If `/dev/kvm` is missing, stop here and troubleshoot nested virtualization before creating VMs.
 
 ---
 
 # 19. Storage Design
 
-VM disks should not be mixed casually with the operating system filesystem.
+Keep VM storage separate from the Ubuntu root filesystem when practical.
 
-The intended structure is:
+Example:
 
 ```text
-redinext
-│
-├── OS
-│
-└── /mnt/vmstore
-    ├── images/
-    │   ├── web01.qcow2
-    │   └── db01.qcow2
-    │
-    └── iso/
-        └── ubuntu-server.iso
+/mnt/vmstore/
+└── images/
+    ├── web01.qcow2
+    └── db01.qcow2
 ```
 
-This makes storage easier to understand, back up, monitor, and expand.
+This makes:
+
+- capacity management,
+- backups,
+- snapshots,
+- disk replacement,
+- monitoring
+
+easier.
 
 ---
 
 # 20. Identify the VM Storage Disk
 
-Always identify disks before formatting them.
+Inspect block devices:
 
 ```bash
-lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINTS
+lsblk -f
 ```
 
-Do **not** assume that:
+Look for the dedicated disk/partition.
 
-```text
-/dev/vdb
-```
+Do not format a disk until you have confirmed its identity.
 
-is safe to format merely because a previous installation used that name.
-
-Verify:
-
-- disk size,
-- device name,
-- filesystem,
-- mount point.
-
-Only then format a new dedicated disk.
-
-Example:
+Useful commands:
 
 ```bash
-sudo mkfs.ext4 /dev/vdb
+lsblk
+lsblk -o NAME,SIZE,FSTYPE,TYPE,MOUNTPOINTS
+sudo blkid
 ```
-
-> **Danger:** `mkfs` destroys existing filesystem data on the selected device.
 
 ---
 
 # 21. Mount the VM Storage
 
-Create the mount point:
+Create a mount point:
 
 ```bash
 sudo mkdir -p /mnt/vmstore
 ```
 
-Mount:
+Format the dedicated filesystem only after confirming the correct device.
+
+Mount it:
 
 ```bash
-sudo mount /dev/vdb /mnt/vmstore
+sudo mount /dev/<device> /mnt/vmstore
 ```
 
 Verify:
 
 ```bash
 df -h /mnt/vmstore
-findmnt /mnt/vmstore
 ```
 
 ---
@@ -1074,24 +1202,34 @@ findmnt /mnt/vmstore
 Get the UUID:
 
 ```bash
-sudo blkid /dev/vdb
+sudo blkid /dev/<device>
 ```
 
-Add an entry to `/etc/fstab`:
-
-```text
-UUID=<UUID> /mnt/vmstore ext4 defaults 0 2
-```
-
-Test the configuration without rebooting:
+Add an entry to:
 
 ```bash
-sudo umount /mnt/vmstore
-sudo mount -a
-findmnt /mnt/vmstore
+sudo nano /etc/fstab
 ```
 
-If `mount -a` fails, fix `/etc/fstab` before rebooting.
+Prefer UUID-based mounting.
+
+Example:
+
+```text
+UUID=<filesystem-uuid> /mnt/vmstore ext4 defaults,noatime 0 2
+```
+
+Test:
+
+```bash
+sudo mount -a
+```
+
+If there are no errors:
+
+```bash
+findmnt /mnt/vmstore
+```
 
 ---
 
@@ -1102,28 +1240,23 @@ sudo mkdir -p /mnt/vmstore/images
 sudo mkdir -p /mnt/vmstore/iso
 ```
 
-Place Ubuntu installation ISOs in:
+Verify:
 
-```text
-/mnt/vmstore/iso/
+```bash
+ls -lah /mnt/vmstore
 ```
-
-VM disks go under:
-
-```text
-/mnt/vmstore/images/
-```
-
-This avoids putting large VM images inside a user's home directory.
 
 ---
 
 # 24. Create a libvirt Storage Pool
 
-A directory-backed libvirt pool can point to the image directory:
+Define a directory-backed pool:
 
 ```bash
-sudo virsh pool-define-as nested-vms dir --target /mnt/vmstore/images
+sudo virsh pool-define-as \
+    nested-vms \
+    dir \
+    --target /mnt/vmstore/images
 ```
 
 Start it:
@@ -1132,7 +1265,7 @@ Start it:
 sudo virsh pool-start nested-vms
 ```
 
-Enable automatic startup:
+Enable autostart:
 
 ```bash
 sudo virsh pool-autostart nested-vms
@@ -1144,68 +1277,115 @@ Verify:
 sudo virsh pool-list --all
 ```
 
-Expected:
-
-```text
-Name         State    Autostart
-nested-vms   active   yes
-```
-
 ---
 
 # 25. Why Use a libvirt Storage Pool?
 
-A storage pool gives libvirt a known location for VM storage.
+A storage pool gives libvirt a known storage location.
 
-Without a pool, VM disks can be scattered across arbitrary directories.
-
-With a pool:
+Instead of manually tracking:
 
 ```text
-libvirt
-   │
-   └── nested-vms
-       │
-       └── /mnt/vmstore/images
+/mnt/vmstore/images/web01.qcow2
 ```
 
-This improves administration and makes commands easier to standardize.
+you can ask libvirt:
+
+```bash
+virsh pool-list --all
+virsh vol-list nested-vms
+```
+
+This is particularly useful as the lab grows.
 
 ---
 
 # 26. The Final Network Design Inside redinext
 
-This is the most important networking section.
+`redinext` is an L1 hypervisor, but it is **not the gateway for the lab subnet**.
 
-`redinext` has two roles:
-
-1. It is a server.
-2. It is the hypervisor for `web01` and `db01`.
-
-The nested VMs connect to:
-
-```text
-br-lab
-```
-
-The bridge has:
-
-```text
-10.10.10.10/24
-```
-
-The VM addresses are:
-
-```text
-web01 = 10.10.10.20/24
-db01  = 10.10.10.30/24
-```
-
-The gateway is:
+The gateway remains:
 
 ```text
 10.10.10.1
 ```
+
+on the physical host's `virbr2`/`labnet`.
+
+`redinext` provides the Layer-2 bridge that connects its own lab interface to the nested VMs.
+
+The inner path is:
+
+```text
+CachyOS
+  │
+virbr2 / labnet
+10.10.10.1
+  │
+vnet3
+  │
+redinext
+enp7s0
+  │
+br-lab
+10.10.10.10
+  │
+ ├── vnet0 → web01 → 10.10.10.20
+ │
+ └── vnet1 → db01  → 10.10.10.30
+```
+
+This is an important distinction:
+
+```text
+10.10.10.1  = outer lab gateway
+10.10.10.10 = redinext host/bridge address
+10.10.10.20 = web01
+10.10.10.30 = db01
+```
+
+All four addresses belong to the same IPv4 subnet:
+
+```text
+10.10.10.0/24
+```
+
+The bridge allows Ethernet frames to move between the virtual NIC of `redinext` and the nested VM interfaces.
+
+## 26.1 Why the gateway is not redinext
+
+It would be possible to design `redinext` as a router, but that is unnecessary for this lab.
+
+Our requirement is:
+
+```text
+web01 ↔ db01 ↔ redinext
+```
+
+on one shared subnet, plus Internet access.
+
+The physical-host libvirt network already provides:
+
+```text
+10.10.10.1
+```
+
+as the gateway and NAT boundary.
+
+Therefore `redinext` only needs to bridge the nested VMs into that Layer-2 network.
+
+This avoids adding:
+
+```text
+IP forwarding
+iptables routing rules
+DNAT
+second NAT
+```
+
+to `redinext`.
+
+That is a deliberate simplification.
 
 ---
 
@@ -1249,51 +1429,103 @@ br-lab
 
 ---
 
-# 28. The Important Difference Between `br-lab` and a libvirt NAT Network
+# 28. The Important Difference Between `br-lab` and `virbr2`
 
-A libvirt NAT network commonly looks like:
+These two devices participate in the same overall lab path, but they have different responsibilities.
 
-```text
-VM
- │
-virbr0
- │
-NAT
- │
-Host
- │
-Internet
-```
+## `virbr2`
 
-A bridge connection looks like:
+Location:
 
 ```text
-VM
- │
-vnet0
- │
-br-lab
- │
-uplink
+CachyOS
 ```
 
-The latter gives the VMs a shared Layer-2 segment.
+Purpose:
 
-That is what we want for this lab.
+```text
+outer gateway + NAT
+```
+
+Address:
+
+```text
+10.10.10.1/24
+```
+
+It is created/managed by libvirt for the `labnet` network.
+
+## `br-lab`
+
+Location:
+
+```text
+redinext
+```
+
+Purpose:
+
+```text
+inner Layer-2 bridge
+```
+
+Address:
+
+```text
+10.10.10.10/24
+```
+
+It connects:
+
+```text
+redinext
+web01
+db01
+```
+
+The combined path is:
+
+```text
+             CachyOS
+                │
+       ┌────────▼────────┐
+       │     virbr2      │
+       │   10.10.10.1    │
+       │   labnet/NAT    │
+       └────────┬────────┘
+                │
+              vnet3
+                │
+          redinext enp7s0
+                │
+           ┌────▼────┐
+           │ br-lab  │
+           │ .10     │
+           └────┬────┘
+                │
+          ┌─────┴─────┐
+          │           │
+        web01       db01
+         .20          .30
+```
+
+So the lab has **one IP subnet but two virtualization layers**.
+
+That is the key concept to retain.
 
 ---
 
 # 29. Configure br-lab on redinext
 
-The exact configuration depends on which interface provides the lab uplink.
-
-In this lab, the relevant uplink interface is:
+The relevant uplink interface inside `redinext` is:
 
 ```text
 enp7s0
 ```
 
-and it is attached to:
+It is connected to the outer `labnet` network on CachyOS.
+
+Inside `redinext`, attach it to:
 
 ```text
 br-lab
@@ -1311,19 +1543,38 @@ and:
 bridge link
 ```
 
-You should see something conceptually similar to:
+You should see conceptually:
 
 ```text
 enp7s0 ... master br-lab
 ```
 
-The bridge carries the Layer-3 address:
+The Layer-3 address belongs to the bridge:
 
 ```text
 br-lab 10.10.10.10/24
 ```
 
-The physical/virtual member interface normally does not carry the host's IP address directly.
+The member interface `enp7s0` should not independently hold the same address.
+
+The bridge therefore looks like:
+
+```text
+enp7s0
+   │
+   └── master br-lab
+
+br-lab
+   └── 10.10.10.10/24
+```
+
+Because `br-lab` is connected through `enp7s0` to `virbr2`, the gateway:
+
+```text
+10.10.10.1
+```
+
+is reachable at Layer 2.
 
 ---
 
@@ -1373,14 +1624,30 @@ Then:
 ip route
 ```
 
-The important route should resemble:
+The important entries should resemble:
 
 ```text
 10.10.10.0/24 dev br-lab src 10.10.10.10
 default via 10.10.10.1 dev br-lab
 ```
 
-The exact route metrics can differ.
+The exact route metrics may differ.
+
+At Layer 2, the path to the gateway is:
+
+```text
+br-lab
+   │
+enp7s0
+   │
+vnet3
+   │
+virbr2
+   │
+10.10.10.1
+```
+
+If the gateway cannot be reached, inspect each link in that chain before changing DNS or guest configuration.
 
 ---
 
@@ -1795,6 +2062,126 @@ This sequence tells you which layer is failing.
 
 ---
 
+# 40.1 Troubleshooting the Outer `virbr2` / `labnet` Path
+
+If `web01` and `db01` have correct addresses but cannot reach:
+
+```text
+10.10.10.1
+```
+
+check the outer network first.
+
+On CachyOS:
+
+```bash
+sudo virsh net-list --all
+```
+
+You should see:
+
+```text
+labnet    active    yes
+```
+
+Then:
+
+```bash
+sudo virsh net-info labnet
+```
+
+Expected conceptually:
+
+```text
+Name:       labnet
+Active:     yes
+Persistent: yes
+Autostart:  yes
+Bridge:     virbr2
+```
+
+Inspect the XML:
+
+```bash
+sudo virsh net-dumpxml labnet
+```
+
+Then:
+
+```bash
+ip -br addr show virbr2
+```
+
+Expected:
+
+```text
+virbr2    UP    10.10.10.1/24
+```
+
+Check `redinext`'s NIC attachment:
+
+```bash
+sudo virsh domiflist redinext
+```
+
+The lab NIC should reference:
+
+```text
+Source = labnet
+```
+
+Then inspect the host-side interface:
+
+```bash
+bridge link
+```
+
+and the bridge forwarding database:
+
+```bash
+bridge fdb show br virbr2
+```
+
+The exact `vnetX` number can vary.
+
+Inside `redinext`:
+
+```bash
+ip -br addr
+```
+
+```bash
+bridge link
+```
+
+The lab interface should be attached to:
+
+```text
+br-lab
+```
+
+This gives a precise troubleshooting chain:
+
+```text
+labnet definition
+      ↓
+virbr2
+      ↓
+redinext vnetX
+      ↓
+redinext enp7s0
+      ↓
+br-lab
+      ↓
+web01/db01 vnetX
+      ↓
+guest NIC
+```
+
+Do not modify DNAT or random firewall rules until this path has been verified.
+
+---
+
 # 41. ARP/Neighbor Troubleshooting
 
 If:
@@ -1879,491 +2266,77 @@ because both systems already live on the same subnet.
 
 Adding DNAT would only introduce another failure point.
 
-Therefore this guide intentionally does **not** include the previous DNAT/port-forwarding rules.
+Therefore this lab does not use DNAT for normal internal VM communication.
 
 ---
 
-# 43. Firewall Philosophy
+# 43. Install `web01`
 
-A server should not expose services merely because they are installed.
+Create the VM using `virt-install`.
 
-First identify listening services:
-
-```bash
-ss -lntup
-```
-
-Then decide which services should be reachable.
-
-For example:
-
-```text
-web01:
-22/tcp   SSH
-80/tcp   HTTP
-443/tcp  HTTPS
-```
-
-`db01` should expose only services that it actually needs.
-
----
-
-# 44. UFW on Ubuntu
-
-Ubuntu's common host firewall frontend is UFW.
-
-Check:
-
-```bash
-sudo ufw status verbose
-```
-
-Install if required:
-
-```bash
-sudo apt install -y ufw
-```
-
-Before enabling a firewall remotely, ensure SSH is permitted.
-
-For example:
-
-```bash
-sudo ufw allow OpenSSH
-```
-
-Then enable:
-
-```bash
-sudo ufw enable
-```
-
-Check:
-
-```bash
-sudo ufw status numbered
-```
-
-> **Important:** Firewall policy should be designed from the required traffic, not copied blindly. A bad rule can disconnect you from a remote server.
-
----
-
-# 45. Do Not Mix Firewall Frameworks Casually
-
-Modern Linux systems may use:
-
-```text
-nftables
-```
-
-while tools such as:
-
-```text
-iptables
-```
-
-may operate through compatibility layers.
-
-Inspect the active firewall configuration before modifying it:
-
-```bash
-sudo nft list ruleset
-```
-
-and:
-
-```bash
-sudo ufw status verbose
-```
-
-If libvirt is managing VM networking, it may also install firewall-related rules.
-
-Do not blindly flush all firewall tables.
-
-That can break:
-
-- VM networking,
-- DNS/DHCP,
-- host security,
-- forwarding,
-- libvirt connectivity.
-
----
-
-# 46. Install Cockpit for Web-Based Management
-
-Cockpit is optional.
-
-The command-line tools remain the primary administration interface.
-
-On Ubuntu:
-
-```bash
-sudo apt update
-sudo apt install -y cockpit
-```
-
-Enable it:
-
-```bash
-sudo systemctl enable --now cockpit.socket
-```
-
-For VM management:
-
-```bash
-sudo apt install -y cockpit-machines
-```
-
-Check:
-
-```bash
-systemctl status cockpit.socket --no-pager
-```
-
-Cockpit uses libvirt/QEMU for its VM management functionality.
-
----
-
-# 47. What Cockpit Does
-
-Cockpit provides a web-based administration interface for:
-
-- system information,
-- services,
-- logs,
-- storage,
-- networking,
-- terminal access,
-- virtual machines.
-
-The VM functionality is backed by libvirt/QEMU.
-
-Conceptually:
-
-```text
-Browser
-   │
-   ▼
-Cockpit
-   │
-   ▼
-libvirt
-   │
-   ▼
-QEMU/KVM
-```
-
-Cockpit is therefore a management interface, not a replacement for libvirt.
-
----
-
-# 48. Accessing Cockpit
-
-Cockpit normally listens on:
-
-```text
-TCP/9090
-```
-
-Check:
-
-```bash
-sudo ss -lntp | grep 9090
-```
-
-Access it from a trusted management network:
-
-```text
-https://10.10.10.10:9090
-```
-
-The exact browser URL depends on how the management network is routed.
-
-Do not expose Cockpit directly to the public Internet unless there is a deliberate security architecture around it.
-
----
-
-# 49. VM Console and VNC
-
-For graphical VM console access, QEMU can expose a VNC display.
-
-Check:
-
-```bash
-sudo virsh domdisplay web01
-sudo virsh domdisplay db01
-```
-
-Example:
-
-```text
-vnc://127.0.0.1:0
-vnc://127.0.0.1:2
-```
-
-The display number corresponds to the TCP port:
-
-```text
-:0 → 5900
-:1 → 5901
-:2 → 5902
-```
-
-The actual ports are determined by the current VM configuration.
-
----
-
-# 50. Why We Prefer QEMU/libvirt VNC for VM Console Access
-
-A VNC console provided by the hypervisor is different from installing a VNC desktop server inside Ubuntu.
-
-### Hypervisor console
-
-```text
-VNC client
-   │
-   ▼
-QEMU
-   │
-   ▼
-Guest display
-```
-
-It can show:
-
-- firmware,
-- bootloader,
-- kernel startup,
-- login screen,
-- graphical desktop.
-
-It does not depend on the guest's normal remote-desktop stack.
-
-### Guest VNC server
-
-```text
-VNC client
-   │
-   ▼
-Guest VNC server
-   │
-   ▼
-GNOME/Xorg/Wayland
-```
-
-That introduces additional guest-side dependencies.
-
-For a server lab, the hypervisor console is generally the simpler recovery mechanism.
-
----
-
-# 51. Secure VNC Access Through SSH
-
-Do not expose QEMU VNC ports unnecessarily.
-
-If QEMU listens only on:
-
-```text
-127.0.0.1
-```
-
-the VNC socket is local to `redinext`.
-
-From your management workstation, create an SSH tunnel:
-
-```bash
-ssh -L 5900:127.0.0.1:5900 vm@10.10.10.10
-```
-
-Then use a VNC-capable viewer against:
-
-```text
-127.0.0.1:5900
-```
-
-For another VM:
-
-```bash
-ssh -L 5902:127.0.0.1:5902 vm@10.10.10.10
-```
-
-This produces:
-
-```text
-Management workstation
-        │
-        │ encrypted SSH
-        ▼
-     redinext
-        │
-        ▼
-     QEMU VNC
-        │
-        ▼
-       VM
-```
-
-This is preferable to opening raw VNC ports across the network.
-
----
-
-# 52. virt-viewer
-
-Install:
-
-```bash
-sudo apt install -y virt-viewer
-```
-
-`virt-viewer` provides a virtualization-focused graphical console client.
-
-It can be used instead of a generic VNC client when appropriate.
-
-On a desktop workstation, install the client there rather than installing a full graphical desktop on the server solely to run the viewer.
-
----
-
-# 53. Why We Avoid a Full Desktop on redinext
-
-`redinext` is an infrastructure server.
-
-A desktop environment introduces:
-
-- additional packages,
-- additional processes,
-- additional memory use,
-- additional attack surface,
-- additional troubleshooting complexity.
-
-The preferred management stack is:
-
-```text
-SSH
-virsh
-Cockpit
-journalctl
-systemctl
-ip
-ss
-tcpdump
-```
-
-Use the VM console when you actually need the VM display.
-
----
-
-# 54. Create web01
-
-A basic `virt-install` workflow is:
+A representative configuration:
 
 ```bash
 sudo virt-install \
-  --name web01 \
-  --memory 2048 \
-  --vcpus 2 \
-  --disk pool=nested-vms,size=15,format=qcow2,bus=virtio \
-  --cdrom /mnt/vmstore/iso/ubuntu-server.iso \
-  --network bridge=br-lab,model=virtio \
-  --osinfo detect=on \
-  --graphics vnc \
-  --noautoconsole
+    --name web01 \
+    --memory 2048 \
+    --vcpus 2 \
+    --disk path=/mnt/vmstore/images/web01.qcow2,size=20,format=qcow2 \
+    --network bridge=br-lab,model=virtio \
+    --os-variant ubuntu24.04 \
+    --graphics vnc \
+    --cdrom /mnt/vmstore/iso/ubuntu-server.iso
 ```
 
-The exact Ubuntu ISO filename and supported `--osinfo` value depend on the release installed.
+Adjust:
 
-Check supported OS variants:
+- memory,
+- CPU count,
+- disk size,
+- ISO path,
+- Ubuntu OS variant
 
-```bash
-virt-install --osinfo list
-```
+to your environment.
 
-If the installer media or `virt-install` version requires a different installation method, follow the current Ubuntu/libvirt guidance rather than forcing a `--location` workflow.
-
----
-
-# 55. Create db01
-
-Use the same pattern:
-
-```bash
-sudo virt-install \
-  --name db01 \
-  --memory 2048 \
-  --vcpus 2 \
-  --disk pool=nested-vms,size=20,format=qcow2,bus=virtio \
-  --cdrom /mnt/vmstore/iso/ubuntu-server.iso \
-  --network bridge=br-lab,model=virtio \
-  --osinfo detect=on \
-  --graphics vnc \
-  --noautoconsole
-```
-
-Adjust RAM, CPU, and disk size according to the workload.
-
----
-
-# 56. Important `virt-install` Options
-
-| Option | Meaning |
-|---|---|
-| `--name` | VM name |
-| `--memory` | RAM allocation |
-| `--vcpus` | virtual CPU allocation |
-| `--disk` | virtual disk |
-| `--network` | VM network attachment |
-| `--cdrom` | installation media |
-| `--osinfo` | guest OS information |
-| `--graphics` | graphical console |
-| `--noautoconsole` | do not automatically attach the console |
-
-The most important networking option in this lab is:
-
-```text
---network bridge=br-lab,model=virtio
-```
-
-It connects the VM to the existing `br-lab`.
-
----
-
-# 57. Verify the VM
-
-List VMs:
+Verify:
 
 ```bash
 sudo virsh list --all
 ```
 
-Get detailed information:
+---
+
+# 44. Install `db01`
+
+Use the same model:
 
 ```bash
-sudo virsh dominfo web01
+sudo virt-install \
+    --name db01 \
+    --memory 2048 \
+    --vcpus 2 \
+    --disk path=/mnt/vmstore/images/db01.qcow2,size=20,format=qcow2 \
+    --network bridge=br-lab,model=virtio \
+    --os-variant ubuntu24.04 \
+    --graphics vnc \
+    --cdrom /mnt/vmstore/iso/ubuntu-server.iso
 ```
 
-Inspect the disk:
+Verify:
 
 ```bash
-sudo virsh domblklist web01
+sudo virsh list --all
 ```
-
-Inspect the network:
-
-```bash
-sudo virsh domiflist web01
-```
-
-Inspect the complete XML:
-
-```bash
-sudo virsh dumpxml web01
-```
-
-The XML is the persistent definition libvirt uses for the VM.
 
 ---
 
-# 58. Basic VM Lifecycle
+# 45. VM Lifecycle Management
+
+List all VMs:
+
+```bash
+sudo virsh list --all
+```
 
 Start:
 
@@ -2383,7 +2356,7 @@ Force stop:
 sudo virsh destroy web01
 ```
 
-> `destroy` is equivalent to removing power, not deleting the VM.
+> `destroy` does not destroy the VM's disk. It immediately stops the VM. Use it only when a graceful shutdown is not possible.
 
 Autostart:
 
@@ -2391,79 +2364,170 @@ Autostart:
 sudo virsh autostart web01
 ```
 
-Disable autostart:
+Disable:
 
 ```bash
-sudo virsh autostart web01 --disable
+sudo virsh autostart --disable web01
 ```
 
 ---
 
-# 59. Important Difference: `shutdown` vs `destroy`
+# 46. Inspect VM Configuration
 
-### `shutdown`
-
-Requests a normal guest shutdown.
-
-```text
-Guest OS
-   ↓
-systemd
-   ↓
-services stop
-   ↓
-power off
+```bash
+sudo virsh dominfo web01
 ```
 
-### `destroy`
-
-Immediately stops the VM from the hypervisor side.
-
-```text
-QEMU process
-   ↓
-stopped
+```bash
+sudo virsh domiflist web01
 ```
 
-Use `shutdown` for normal operations.
+```bash
+sudo virsh domblklist web01
+```
 
-Use `destroy` only when the guest is unresponsive or a controlled hard power-off is required.
+```bash
+sudo virsh dumpxml web01
+```
+
+The XML is especially useful when debugging:
+
+- CPU configuration
+- memory
+- disks
+- NICs
+- bridges
+- VNC/SPICE
+- boot configuration
 
 ---
 
-# 60. SSH Administration
+# 47. VNC Console
 
-Once `web01` has:
+QEMU can expose a VM's graphical console through VNC.
+
+Check:
+
+```bash
+sudo virsh domdisplay web01
+sudo virsh domdisplay db01
+```
+
+For example:
 
 ```text
-10.10.10.20
+vnc://127.0.0.1:0
+vnc://127.0.0.1:2
 ```
 
-connect with:
+The display numbers map to ports:
+
+```text
+:0 → 5900
+:1 → 5901
+:2 → 5902
+```
+
+Do not expose VNC directly to the LAN unless there is a specific security requirement and appropriate authentication/protection.
+
+A safer approach is an SSH tunnel.
+
+Example:
 
 ```bash
-ssh dev@10.10.10.20
+ssh -L 5900:127.0.0.1:5900 vm@10.10.10.10
 ```
 
-For `db01`:
-
-```bash
-ssh dbuser@10.10.10.30
-```
-
-Use the actual accounts created during installation.
-
-Check the SSH service:
-
-```bash
-sudo systemctl status ssh --no-pager
-```
+Then use a VNC/remote-viewer client locally.
 
 ---
 
-# 61. Configure web01 as a Web Server
+# 48. Cockpit
 
-Install Nginx:
+Cockpit provides web-based Linux administration.
+
+For virtualization:
+
+```text
+Browser
+   │
+   ▼
+Cockpit
+   │
+   ▼
+libvirt
+   │
+   ▼
+QEMU/KVM
+```
+
+Install:
+
+```bash
+sudo apt install -y cockpit cockpit-machines
+```
+
+Enable:
+
+```bash
+sudo systemctl enable --now cockpit.socket
+```
+
+Verify:
+
+```bash
+systemctl status cockpit.socket --no-pager
+```
+
+Cockpit is useful for:
+
+- VM lifecycle
+- console access
+- storage
+- network inspection
+- system monitoring
+
+SSH remains the primary administrative interface.
+
+---
+
+# 49. Firewall
+
+Use UFW only after understanding the existing network.
+
+Check:
+
+```bash
+sudo ufw status verbose
+```
+
+Enable only the services you actually need.
+
+For SSH:
+
+```bash
+sudo ufw allow OpenSSH
+```
+
+Then:
+
+```bash
+sudo ufw enable
+```
+
+Verify:
+
+```bash
+sudo ufw status numbered
+```
+
+Do not blindly copy firewall rules from unrelated environments.
+
+---
+
+# 50. Web Server Example
+
+On `web01`:
 
 ```bash
 sudo apt update
@@ -2479,1007 +2543,508 @@ sudo systemctl status nginx --no-pager
 Test locally:
 
 ```bash
-curl -I http://127.0.0.1
+curl http://127.0.0.1
 ```
 
-Check the listener:
+From another machine:
 
 ```bash
-ss -lntp | grep ':80'
+curl http://10.10.10.20
+```
+
+Verify listening sockets:
+
+```bash
+sudo ss -lntp
 ```
 
 ---
 
-# 62. Understand the Nginx Test
+# 51. Database Server Example
 
-If:
+On `db01`, install the database software required by the lab.
 
-```bash
-curl -I http://127.0.0.1
-```
-
-returns:
-
-```text
-HTTP/1.1 200 OK
-```
-
-then:
-
-- the local network stack works,
-- TCP works,
-- port 80 is listening,
-- Nginx accepted the request,
-- Nginx produced an HTTP response.
-
-If it returns:
-
-```text
-403 Forbidden
-```
-
-the request still reached Nginx.
-
-That is not primarily a routing problem.
-
----
-
-# 63. Nginx 403 Troubleshooting
-
-Inspect:
+For example:
 
 ```bash
-sudo tail -30 /var/log/nginx/error.log
+sudo apt update
+sudo apt install -y postgresql
 ```
 
 Check:
 
 ```bash
-sudo ls -la /var/www/html
+sudo systemctl status postgresql --no-pager
 ```
 
-Check every directory component:
+Do not expose database services unnecessarily.
 
-```bash
-namei -l /var/www/html/index.html
-```
-
-If the error indicates that the file cannot be read, inspect ownership and permissions.
-
-For a simple static file:
-
-```bash
-sudo chmod 644 /var/www/html/index.html
-```
-
-Then:
-
-```bash
-sudo nginx -t
-sudo systemctl reload nginx
-```
-
-Retest:
-
-```bash
-curl -I http://127.0.0.1
-```
+The database should normally be reachable only by systems that need it.
 
 ---
 
-# 64. `db01` as an Internal Server
+# 52. Host and VM Monitoring
 
-The name `db01` identifies its intended role in this lab.
-
-Keep its externally reachable services minimal.
-
-Possible future services include:
-
-- PostgreSQL
-- MariaDB
-- MySQL
-- Redis
-- SFTP
-- SMB
-- application backend services
-
-Do not install services simply because the package exists.
-
-The principle is:
-
-```text
-Requirement
-    ↓
-Service
-    ↓
-Listening port
-    ↓
-Firewall rule
-    ↓
-Monitoring/logging
-```
-
----
-
-# 65. Server Management Baseline
-
-On every Ubuntu server, learn these commands.
-
-## Identity
+Useful commands:
 
 ```bash
-hostnamectl
-whoami
-id
-```
-
-## Processes
-
-```bash
-ps aux
-top
-```
-
-## Memory
-
-```bash
+uptime
 free -h
-```
-
-## Storage
-
-```bash
-lsblk
 df -h
-findmnt
-```
-
-## Network
-
-```bash
+lsblk
+ss -tulpn
 ip -br addr
 ip route
-ip neigh
 ```
 
-## Listening services
+For VMs:
 
 ```bash
-ss -lntup
+virsh list
+virsh dominfo web01
+virsh domstats web01
 ```
 
-## Services
+For processes:
 
 ```bash
-systemctl status <service>
+ps aux --sort=-%mem | head
 ```
 
-## Logs
+---
+
+# 53. Logs
+
+Systemd logs:
 
 ```bash
-journalctl -u <service>
+journalctl -b
 ```
 
-## Kernel messages
+Service logs:
+
+```bash
+journalctl -u ssh
+journalctl -u nginx
+journalctl -u libvirtd
+```
+
+Kernel/network logs:
 
 ```bash
 journalctl -k
 ```
 
-These are foundational Linux administration skills.
+When troubleshooting, prefer logs and observable state over assumptions.
 
 ---
 
-# 66. Libvirt Management Commands
+# 54. Network Troubleshooting Framework
 
-## VMs
+Use the following sequence.
 
-```bash
-sudo virsh list --all
-```
-
-## Information
+## Layer 1 — Link
 
 ```bash
-sudo virsh dominfo web01
-sudo virsh dominfo db01
-```
-
-## Interfaces
-
-```bash
-sudo virsh domiflist web01
-sudo virsh domiflist db01
-```
-
-## Disks
-
-```bash
-sudo virsh domblklist web01
-sudo virsh domblklist db01
-```
-
-## Display
-
-```bash
-sudo virsh domdisplay web01
-sudo virsh domdisplay db01
-```
-
-## XML
-
-```bash
-sudo virsh dumpxml web01
-```
-
-## Network
-
-```bash
-sudo virsh net-list --all
-sudo virsh net-info <network>
-sudo virsh net-dumpxml <network>
-```
-
-## Storage pools
-
-```bash
-sudo virsh pool-list --all
-sudo virsh pool-info nested-vms
-```
-
----
-
-# 67. Attaching a VM Interface to br-lab
-
-If a VM needs to be attached to the bridge:
-
-```bash
-sudo virsh attach-interface \
-    web01 \
-    bridge \
-    br-lab \
-    --model virtio \
-    --config
-```
-
-The `--config` option changes the persistent VM configuration.
-
-For a running VM, live and persistent changes are distinct. Check the current state with:
-
-```bash
-sudo virsh domiflist web01
-```
-
-If you are unsure whether a change is live, inspect the domain XML and VM state rather than repeatedly attaching interfaces.
-
----
-
-# 68. Avoid Duplicate VM NICs
-
-A common troubleshooting mistake is repeatedly running:
-
-```bash
-virsh attach-interface ...
-```
-
-and accidentally creating multiple NICs.
-
-Check:
-
-```bash
-sudo virsh domiflist web01
-```
-
-A simple server VM should normally have one lab NIC unless there is a specific architectural reason for multiple interfaces.
-
-If you see:
-
-```text
-52:54:00:...
-52:54:00:...
-```
-
-twice, determine whether both interfaces are intentional.
-
-Duplicate NICs can create:
-
-- multiple routes,
-- multiple DHCP leases,
-- confusing interface names,
-- asymmetric routing,
-- incorrect default routes,
-- difficult ARP troubleshooting.
-
----
-
-# 69. MAC Addresses
-
-A bridge and a VM NIC should normally have different MAC addresses.
-
-For example:
-
-```text
-br-lab:
-82:20:d7:87:fd:ac
-
-web01 NIC:
-52:54:00:8b:f6:14
-```
-
-This is normal.
-
-Think of the bridge as a switch and the VM NIC as a host attached to that switch.
-
-Do not attempt to make their MAC addresses identical.
-
----
-
-# 70. Troubleshooting a VM With No Network
-
-Use this sequence.
-
-## On the guest
-
-```bash
-ip -br addr
 ip link
+```
+
+Is the interface:
+
+```text
+UP
+```
+
+?
+
+## Layer 2 — Bridge
+
+```bash
+bridge link
+bridge fdb show
+```
+
+Is the VM interface attached to the expected bridge?
+
+## Layer 3 — Address
+
+```bash
+ip addr
+```
+
+Is the IP correct?
+
+## Layer 3 — Routing
+
+```bash
 ip route
+```
+
+Is the default route correct?
+
+## Neighbor discovery
+
+```bash
 ip neigh
 ```
 
-## On redinext
+Can the system resolve the gateway's MAC address?
+
+## DNS
 
 ```bash
-sudo virsh domiflist web01
-bridge link
-bridge fdb show br br-lab
+resolvectl status
 ```
 
-## Check the bridge address
+or:
 
 ```bash
-ip addr show br-lab
+cat /etc/resolv.conf
 ```
 
-## Check routing
+## Application
 
 ```bash
-ip route
-ip route get 10.10.10.20
+ss -lntp
+curl
+nc
 ```
 
-## Capture traffic
-
-```bash
-sudo tcpdump -ni br-lab arp
-```
-
-Then generate traffic from the guest:
-
-```bash
-ping -c 3 10.10.10.10
-```
-
-This gives evidence about whether the packet reaches the bridge.
+This prevents random troubleshooting.
 
 ---
 
-# 71. Troubleshooting With `ip neigh`
-
-Neighbor states are useful.
-
-```text
-REACHABLE
-```
-
-The neighbor is known and reachable.
-
-```text
-STALE
-```
-
-The cached information exists but has not recently been confirmed.
-
-```text
-INCOMPLETE
-```
-
-ARP/neighbor resolution is still waiting for a response.
-
-```text
-FAILED
-```
-
-Neighbor resolution failed.
+# 55. Use `tcpdump` as Evidence
 
 For example:
 
-```text
-10.10.10.10 dev enp1s0 FAILED
-```
-
-means the guest could not resolve the Layer-2 neighbor.
-
-Do not start changing DNS when this is the error.
-
----
-
-# 72. Packet Capture Methodology
-
-`tcpdump` is one of the most valuable troubleshooting tools in this lab.
-
-Capture ARP:
-
 ```bash
 sudo tcpdump -ni br-lab arp
 ```
 
-Capture ICMP:
-
-```bash
-sudo tcpdump -ni br-lab icmp
-```
-
-Capture HTTP:
-
-```bash
-sudo tcpdump -ni br-lab 'tcp port 80'
-```
-
-Capture SSH:
-
-```bash
-sudo tcpdump -ni br-lab 'tcp port 22'
-```
-
-Capture everything between two hosts:
+Or:
 
 ```bash
 sudo tcpdump -ni br-lab host 10.10.10.20
 ```
 
-The goal is not to "run tcpdump until something works."
+You can determine:
 
-The goal is to answer:
+- whether packets leave,
+- whether replies return,
+- whether ARP succeeds,
+- whether DNS traffic exists,
+- whether TCP handshakes occur.
 
-```text
-Did the packet leave?
-Did it reach the interface?
-Did the destination respond?
-Where did the packet disappear?
-```
-
----
-
-# 73. Troubleshooting by Layers
-
-Use this model:
-
-```text
-Layer 7  Application
-         Nginx / SSH / DNS
-
-Layer 4  TCP / UDP
-         ports / sockets
-
-Layer 3  IP
-         address / routing
-
-Layer 2  Ethernet
-         MAC / ARP / bridge
-
-Layer 1  Link
-         interface state
-```
-
-Example:
-
-```text
-google.com fails
-```
-
-Do not immediately assume DNS.
-
-Test:
-
-```bash
-ping -c 3 1.1.1.1
-```
-
-If that works:
-
-```bash
-ping -c 3 google.com
-```
-
-If the IP works but the name fails, investigate DNS.
+This is more reliable than guessing.
 
 ---
 
-# 74. Common Failure: `virsh: command not found`
+# 56. Backups
 
-Install the client tooling.
+Back up:
 
-On Ubuntu:
+- VM XML definitions
+- VM disks
+- Netplan files
+- libvirt network definitions
+- important service configuration
+- documentation
 
-```bash
-sudo apt install -y libvirt-clients
-```
-
-and the VM creation tooling:
-
-```bash
-sudo apt install -y virtinst
-```
-
-Verify:
+Export VM XML:
 
 ```bash
-virsh --version
-virt-install --version
+sudo virsh dumpxml web01 > web01.xml
+sudo virsh dumpxml db01 > db01.xml
 ```
+
+Export network XML:
+
+```bash
+sudo virsh net-dumpxml labnet > labnet.xml
+```
+
+Keep copies outside the VM storage directory.
 
 ---
 
-# 75. Common Failure: Libvirt Network Is Inactive
+# 57. Snapshots
 
-Check:
+Snapshots can be useful during experimentation.
 
-```bash
-sudo virsh net-list --all
-```
-
-If the required network is inactive:
+Before a risky change:
 
 ```bash
-sudo virsh net-start <network>
+sudo virsh snapshot-create-as web01 before-change
 ```
 
-For automatic startup:
-
-```bash
-sudo virsh net-autostart <network>
-```
-
-However, this applies only to libvirt-managed networks.
-
-`br-lab` in this architecture is an externally managed Linux bridge. Do not confuse it with a libvirt NAT network.
-
----
-
-# 76. Common Failure: VM Interface Shows `-`
-
-If:
-
-```bash
-sudo virsh domiflist web01
-```
-
-shows:
-
-```text
--    bridge    br-lab    virtio
-```
-
-while the VM is shut down, that can be normal.
-
-After starting:
-
-```bash
-sudo virsh start web01
-```
-
-check again.
-
-A running VM should normally show a host-side interface such as:
-
-```text
-vnet0
-```
-
-Then:
-
-```bash
-bridge link
-```
-
-should show that interface attached to:
-
-```text
-br-lab
-```
-
----
-
-# 77. Common Failure: No Internet but Local Network Works
-
-Test:
-
-```bash
-ping -c 3 10.10.10.10
-```
-
-Then:
-
-```bash
-ping -c 3 10.10.10.1
-```
-
-Then:
-
-```bash
-ping -c 3 1.1.1.1
-```
-
-Then:
-
-```bash
-ping -c 3 google.com
-```
-
-Interpretation:
-
-| Result | Likely area |
-|---|---|
-| `.10` fails | local VM/bridge |
-| `.10` works, `.1` fails | gateway/uplink |
-| `.1` works, `1.1.1.1` fails | routing/NAT/upstream |
-| `1.1.1.1` works, `google.com` fails | DNS |
-| all work | network is probably healthy |
-
----
-
-# 78. Common Failure: GUI Blank Screen
-
-For infrastructure servers, the GUI is not the primary administration path.
-
-Check the VM from the host:
-
-```bash
-sudo virsh domdisplay web01
-```
-
-Check the VM's graphics XML:
-
-```bash
-sudo virsh dumpxml web01 | grep -A10 -B2 '<graphics'
-```
-
-Check the virtual GPU:
-
-```bash
-sudo virsh dumpxml web01 | grep -A8 '<video'
-```
-
-Inside the guest:
-
-```bash
-lspci -k | grep -A3 -Ei 'vga|3d|display'
-```
-
-If the server's graphical environment is broken, use:
-
-```text
-SSH
-virsh console
-Cockpit
-QEMU VNC
-```
-
-rather than repeatedly reinstalling the desktop.
-
----
-
-# 79. Common Failure: GNOME Consumes Resources
-
-A server does not require GNOME merely because it is a VM.
-
-Check resource usage:
-
-```bash
-free -h
-ps -eo pid,comm,%cpu,%mem --sort=-%mem | head
-```
-
-A graphical environment consumes memory and CPU and introduces more software.
-
-For infrastructure work, a server installation is generally preferable.
-
----
-
-# 80. Backups and Snapshots
-
-VM storage is data.
-
-Before major changes:
+List:
 
 ```bash
 sudo virsh snapshot-list web01
 ```
 
-For supported configurations, snapshots can be used carefully.
-
-Do not treat snapshots as a complete backup strategy.
-
-A backup should provide:
-
-- independent storage,
-- known retention,
-- integrity checks,
-- restoration testing.
-
-A snapshot stored on the same disk does not protect against disk failure.
+Snapshots are not a substitute for backups.
 
 ---
 
-# 81. Basic Operational Discipline
+# 58. Change Management
 
-Before changing anything:
+Treat infrastructure changes like engineering changes.
 
-```text
-1. What is broken?
-2. What should the expected state be?
-3. Which layer owns the problem?
-4. What command proves the current state?
-5. What exactly am I changing?
-6. How will I verify it?
-7. How will I undo it?
-```
-
-This is more important than memorizing commands.
-
----
-
-# 82. Change One Thing at a Time
-
-Avoid this:
+Before modifying a system:
 
 ```text
-Change Netplan
-Change firewall
-Restart libvirt
-Change bridge
-Restart NetworkManager
-Reboot
+1. Record current state
+2. Identify expected result
+3. Make one change
+4. Verify
+5. Document
 ```
 
-If the problem disappears, you do not know which change fixed it.
-
-Prefer:
-
-```text
-Observe
-  ↓
-Hypothesis
-  ↓
-One change
-  ↓
-Test
-  ↓
-Record result
-```
-
-This is the same methodology used in real infrastructure troubleshooting.
-
----
-
-# 83. Final Validation Checklist
-
-## Physical host
+Example:
 
 ```bash
-lscpu | grep Virtualization
-ls -l /dev/kvm
-lsmod | grep kvm
-systemctl status libvirtd --no-pager
-```
-
-## redinext
-
-```bash
-hostnamectl
 ip -br addr
 ip route
-ls -l /dev/kvm
-kvm-ok
-sudo virt-host-validate qemu
-```
-
-## Bridge
-
-```bash
-ip addr show br-lab
 bridge link
-bridge fdb show br br-lab
 ```
 
-## VMs
+Record the output.
 
-```bash
-sudo virsh list --all
-sudo virsh domiflist web01
-sudo virsh domiflist db01
-```
+Then modify the configuration.
 
-## web01
+Then run the same commands again.
 
-```bash
-ip -br addr
-ip route
-ping -c 3 10.10.10.10
-ping -c 3 10.10.10.30
-curl -I http://127.0.0.1
-```
-
-## db01
-
-```bash
-ip -br addr
-ip route
-ping -c 3 10.10.10.10
-ping -c 3 10.10.10.20
-```
-
-## Management
-
-```bash
-systemctl status ssh --no-pager
-systemctl status cockpit.socket --no-pager
-```
+This makes troubleshooting reproducible.
 
 ---
 
-# 84. Final Architecture Summary
+# 59. Common Problems
 
-The finished lab should look like:
+## VM has no IP
+
+Check:
+
+```bash
+virsh domiflist <vm>
+ip link
+ip addr
+```
+
+Then:
+
+```bash
+ip neigh
+```
+
+## VM has an IP but cannot reach gateway
+
+Check:
+
+```bash
+bridge link
+bridge fdb show
+```
+
+On the outer host:
+
+```bash
+virsh domiflist redinext
+virsh net-info labnet
+ip -br addr show virbr2
+```
+
+## Internet does not work
+
+Check in this order:
 
 ```text
-                         INTERNET
-                            │
-                     Home/Lab Router
-                      192.168.0.1
-                            │
-                         Wi-Fi
-                            │
-                    ┌───────▼────────┐
-                    │    CachyOS     │
-                    │ Physical Host  │
-                    │ 192.168.0.x    │
-                    │                │
-                    │ KVM + libvirt  │
-                    └───────┬────────┘
-                            │
-                     Lab uplink
-                    10.10.10.0/24
-                            │
-                     10.10.10.1
-                            │
-                    ┌───────▼────────┐
-                    │    redinext    │
-                    │ Ubuntu Server  │
-                    │ 10.10.10.10    │
-                    │                │
-                    │ br-lab         │
-                    │ KVM + libvirt  │
-                    │ Cockpit        │
-                    │ SSH            │
-                    └───────┬────────┘
-                            │
-                       br-lab L2
-                    10.10.10.0/24
-                            │
-                 ┌──────────┴──────────┐
-                 │                     │
-          ┌──────▼──────┐       ┌──────▼──────┐
-          │    web01    │       │    db01     │
-          │10.10.10.20  │       │10.10.10.30  │
-          │             │       │             │
-          │    Nginx    │       │ Internal    │
-          │    SSH      │       │ Services    │
-          └─────────────┘       └─────────────┘
+Guest IP
+↓
+Default route
+↓
+10.10.10.1
+↓
+Outer virbr2/labnet
+↓
+CachyOS Internet
+↓
+DNS
 ```
 
-The key design decision is:
+Do not change DNS when the gateway itself is unreachable.
+
+## VNC is blank
+
+Check:
+
+```bash
+virsh domdisplay <vm>
+virsh dumpxml <vm>
+```
+
+Also verify the guest graphics stack.
+
+For server administration, SSH is preferable when available.
+
+## Cockpit cannot manage VMs
+
+Check:
+
+```bash
+systemctl status cockpit.socket
+systemctl status libvirtd
+virsh list --all
+```
+
+The underlying libvirt/QEMU stack should be verified before blaming Cockpit.
+
+---
+
+# 60. Security Considerations
+
+This lab is intentionally designed to reduce unnecessary attack surface.
+
+Principles:
+
+- SSH instead of unnecessary remote desktops
+- no unnecessary public VNC
+- no DNAT for internal VM communication
+- minimal firewall exposure
+- separate lab subnet
+- controlled VM storage
+- regular updates
+- least privilege
+- documented changes
+- backups
+
+Remember that virtualization does not eliminate security boundaries.
+
+The stack is:
 
 ```text
-ONE SHARED LAB SUBNET
-10.10.10.0/24
-
-redinext  → 10.10.10.10
-web01     → 10.10.10.20
-db01      → 10.10.10.30
-
-all attached to:
-
-br-lab
+Guest OS
+   │
+Virtual devices
+   │
+QEMU
+   │
+libvirt
+   │
+Linux kernel/KVM
+   │
+Hardware
 ```
 
-This is deliberately simpler than the original multi-NAT/DNAT architecture.
+A vulnerability at any relevant boundary can have security implications.
 
 ---
 
-# 85. Recommended Next Steps
+# 61. Enterprise-Oriented Improvements
 
-Once the base infrastructure is stable, build functionality in layers.
+Once the basic lab is stable, the next steps can include:
 
-## Phase 1 — Linux Administration
+## Identity
 
-- [ ] Users and groups
-- [ ] File ownership
-- [ ] Permissions
-- [ ] ACLs
-- [ ] systemd
-- [ ] journald
-- [ ] SSH keys
-- [ ] SSH hardening
-- [ ] Bash administration
+- centralized authentication
+- LDAP/Active Directory
+- SSH key management
 
-## Phase 2 — Virtualization
+## Monitoring
 
-- [ ] VM templates
-- [ ] snapshots
-- [ ] cloning
-- [ ] storage pools
-- [ ] resource limits
-- [ ] VM autostart
-- [ ] Cockpit
-- [ ] virt-viewer
+- Prometheus
+- Grafana
+- node exporters
+- centralized logs
 
-## Phase 3 — Networking
+## Automation
 
-- [ ] Linux bridges
-- [ ] VLANs
-- [ ] routing
-- [ ] nftables
-- [ ] DNS
-- [ ] DHCP
-- [ ] network segmentation
-- [ ] packet capture
+- Ansible
+- Terraform where appropriate
+- Git-based configuration
 
-## Phase 4 — Web Infrastructure
+## Networking
 
-- [ ] Nginx virtual hosts
-- [ ] HTTPS
-- [ ] TLS certificates
-- [ ] reverse proxying
-- [ ] access/error logs
-- [ ] security headers
-- [ ] service hardening
+- VLANs
+- dedicated management network
+- firewall/router VM
+- DNS
+- DHCP reservations
+- IPAM
 
-## Phase 5 — Database/Internal Services
+## Security
 
-- [ ] PostgreSQL or MariaDB
-- [ ] database users
-- [ ] authentication
-- [ ] service binding
-- [ ] firewall restrictions
-- [ ] backups
-- [ ] restore testing
+- host hardening
+- auditd
+- fail2ban where appropriate
+- vulnerability scanning
+- network segmentation
+- secrets management
 
-## Phase 6 — Operations
+## Reliability
 
-- [ ] monitoring
-- [ ] centralized logs
-- [ ] automated backups
-- [ ] configuration management
-- [ ] health checks
-- [ ] alerting
-- [ ] disaster recovery testing
+- automated backups
+- tested restores
+- snapshot strategy
+- configuration backups
 
-## Phase 7 — Security
+Do not add these technologies simply to make the lab look "enterprise."
 
-- [ ] SSH hardening
-- [ ] service enumeration
-- [ ] firewall testing
-- [ ] network segmentation validation
-- [ ] vulnerability assessment
-- [ ] attack-path analysis
-- [ ] hardening verification
-- [ ] incident-response exercises
+Add them when they solve a real problem.
 
 ---
 
-# 86. Reference Documentation
+# 62. Recommended Operating Model
+
+A useful structure is:
+
+```text
+Layer 0
+Physical host
+    │
+    └── CachyOS
+
+Layer 1
+Infrastructure VM
+    │
+    └── redinext
+
+Layer 2
+Workload VMs
+    │
+    ├── web01
+    └── db01
+```
+
+Network:
+
+```text
+Physical network
+192.168.0.0/24
+        │
+        ▼
+CachyOS
+        │
+        ▼
+labnet / virbr2
+10.10.10.1
+        │
+        ▼
+redinext / br-lab
+10.10.10.10
+        │
+   ┌────┴────┐
+   ▼         ▼
+web01      db01
+.20         .30
+```
+
+This is simple enough to understand and complex enough to teach real infrastructure concepts.
+
+---
+
+# 63. Reference Documentation
 
 Use primary documentation whenever possible.
 
@@ -3502,7 +3067,9 @@ Use primary documentation whenever possible.
 ## libvirt
 
 - [libvirt documentation](https://www.libvirt.org/docs/)
-- [libvirt networking](https://www.libvirt.org/formatnetwork.html)
+- [libvirt networking overview](https://wiki.libvirt.org/Networking.html)
+- [libvirt virtual networking](https://wiki.libvirt.org/VirtualNetworking.html)
+- [libvirt network XML format](https://libvirt.org/formatnetwork.html)
 - [libvirt domain XML](https://www.libvirt.org/formatdomain.html)
 - [virsh reference](https://www.libvirt.org/manpages/virsh.html)
 
@@ -3523,9 +3090,9 @@ Use primary documentation whenever possible.
 
 ---
 
-# 87. Final Engineering Checklist
+# 64. Final Engineering Checklist
 
-Before calling the lab "complete", verify that you can explain all of the following without copying a command from this document:
+Before calling the lab "complete", verify that you can explain all of the following without copying a command from this document.
 
 ### Virtualization
 
@@ -3539,9 +3106,11 @@ Before calling the lab "complete", verify that you can explain all of the follow
 
 ### Networking
 
+- What the outer `labnet` network does
+- What `virbr2` is and why `10.10.10.1` is the gateway
 - What a Layer-2 bridge is
 - What `br-lab` does
-- What `vnet0` and `vnet1` are
+- What the outer `vnet3` and inner `vnet0`/`vnet1` interfaces represent
 - Why the VM MAC and bridge MAC are different
 - Why ARP must work before normal IPv4 communication
 - What a default route does
@@ -3568,10 +3137,11 @@ Before calling the lab "complete", verify that you can explain all of the follow
 - How to use `tcpdump`
 - How to verify a change
 - How to back out a change
+- How to verify the outer `labnet` network
 
 ---
 
-# 88. The Most Important Lesson
+# 65. The Most Important Lesson
 
 The goal of this lab is not to memorize:
 
