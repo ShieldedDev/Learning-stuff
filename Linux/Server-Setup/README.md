@@ -42,7 +42,7 @@ Physical Machine
                       │
                       ├── WEB01
                       │
-                      └── FILE01
+                      └── DB01
 ```
 
 ---
@@ -57,16 +57,16 @@ Physical Machine
                                 │
                              Wi-Fi LAN
                                 │
-                 ┌──────────────▼──────────────┐
-                 │           CatchyOS          │
-                 │     Physical Linux Host     │
-                 │                              │
-                 │ wlan0: 192.168.0.119/24      │
-                 │                              │
-                 │ libvirt virbr0: 10.10.1.1/24│
-                 └──────────────┬───────────────┘
+                  ┌──────────────▼──────────────┐
+                  │           CatchyOS          │
+                  │     Physical Linux Host     │
+                  │                             │
+                  │ wlan0: 192.168.0.119/24     │
+                  │                             │
+                  │libvirt virbr2: 10.10.10.1/24│
+                  └─────────────┬───────────────┘
                                 │
-                         10.10.1.0/24
+                         10.10.10.1/24
                                 │
                        ┌────────▼────────┐
                        │     redinext    │
@@ -77,20 +77,20 @@ Physical Machine
                        │                 │
                        │ virbr0          │
                        │ 10.10.2.1/24    │
-                       └────────┬─────────┘
+                       ────────┬─────────┘
                                 │
                          10.10.2.0/24
                                 │
                     ┌───────────┴───────────┐
                     │                       │
-             ┌──────▼──────┐        ┌──────▼──────┐
-             │    WEB01    │        │   FILE01    │
-             │ Ubuntu      │        │ Ubuntu      │
-             │ Server      │        │ Server      │
-             │             │        │             │
-             │10.10.2.10   │        │10.10.2.202  │
-             │ Nginx       │        │ SFTP/SMB    │
-             └─────────────┘        └─────────────┘
+             ┌──────▼──────┐         ┌──────▼──────┐
+             │    WEB01    │         │     DB01    │
+             │ Ubuntu      │         │ Ubuntu      │
+             │ Server      │         │ Server      │
+             │             │         │             │
+             │10.10.10.10  │         │ 10.10.10.20 │
+             │ Nginx       │         │ SFTP/SMB    │
+             └─────────────┘         └─────────────┘
 ```
 
 ## 2.2 Address plan
@@ -99,9 +99,9 @@ Physical Machine
 |---|---|---:|---|
 | Router | LAN | `192.168.0.1/24` | Physical network gateway |
 | CatchyOS | `wlan0` | `192.168.0.119/24` | Physical Linux host |
-| CatchyOS | `virbr0` | `10.10.1.1/24` | L1 libvirt gateway |
+| CatchyOS | `virbr0` | `10.10.10.1/24` | L1 libvirt gateway |
 | redinext | `enp1s0` | `10.10.1.10/24` | WAN/upstream side |
-| redinext | `virbr0` | `10.10.2.1/24` | Internal server gateway |
+| redinext | `virbr0` | `10.10.1.1/24` | Internal server gateway |
 | WEB01 | `enp1s0` | `10.10.2.10/24` | Web server |
 | FILE01 | `enp1s0` | `10.10.2.202/24` | Internal file server |
 
@@ -140,17 +140,8 @@ Responsible for:
 - Routing/NAT between networks
 - Hosting application/file workloads
 
-## Layer 2 — Workloads
 
-**WEB01 / FILE01**
-
-Responsible only for their application roles.
-
-This separation matters because the hypervisor should not become the application server. If WEB01 fails, the hypervisor should remain usable.
-
----
-
-# 4. Important Wi-Fi Design Constraint
+# 3. Wi-Fi Design Constraint
 
 The physical host is connected through:
 
@@ -176,11 +167,11 @@ This is an important infrastructure lesson:
 
 ---
 
-# 5. Layer 0 — Prepare CatchyOS
+# 4. Layer 0 — Prepare CatchyOS
 
 CatchyOS is the physical Arch-based Linux host.
 
-## 5.1 Verify CPU virtualization
+## 4.1 Verify CPU virtualization
 
 ```bash
 lscpu | grep -E 'Model name|Virtualization'
@@ -192,7 +183,7 @@ Expected:
 Virtualization: VT-x
 ```
 
-## 5.2 Verify KVM
+## 4.2 Verify KVM
 
 ```bash
 ls -l /dev/kvm
@@ -215,7 +206,7 @@ The lab hardware used:
 
 with VT-x exposed directly to CatchyOS.
 
-## 5.3 Check the network
+## 4.3 Check the network
 
 ```bash
 ip -br addr
@@ -225,12 +216,12 @@ The host used:
 
 ```text
 wlan0    UP    192.168.0.119/24
-virbr0   UP    10.10.1.1/24
+virbr2   UP    10.10.10.1/24
 ```
 
 ---
 
-# 6. Install KVM/libvirt on CatchyOS
+# 5. Install KVM/libvirt on CatchyOS
 
 The exact package set can vary with the Arch-based distribution, but the lab used the following virtualization stack:
 
@@ -286,26 +277,26 @@ sudo virt-host-validate qemu
 
 ---
 
-# 7. Libvirt Network on CatchyOS
+# 6. Libvirt Network on CatchyOS
 
 The first libvirt network was changed to:
 
 ```text
-10.10.1.0/24
+10.10.10.0/24
 ```
 
 with:
 
 ```text
-CatchyOS virbr0 = 10.10.1.1
-redinext         = 10.10.1.10
+CatchyOS virbr2= 10.10.10.1
+redinext         = 10.10.10.10
 ```
 
 Verify:
 
 ```bash
 sudo virsh net-list --all
-ip -br addr show virbr0
+ip -br addr show virbr2
 ```
 
 The network must be active before creating a VM.
@@ -332,7 +323,7 @@ sudo virsh net-list --all
 
 ---
 
-# 8. Storage Design
+# 7. Storage Design
 
 A separate storage device was used for nested VM storage.
 
@@ -352,7 +343,7 @@ nested VM images
 
 This avoids filling the OS filesystem with VM disks.
 
-## 8.1 Verify the additional disk
+## 7.1 Verify the additional disk
 
 Inside `redinext`:
 
@@ -368,7 +359,7 @@ The additional disk became:
 
 with a target size of **50 GB**.
 
-## 8.2 Format as ext4
+## 7.2 Format as ext4
 
 Only after verifying that `/dev/vdb` is actually the new 50 GB disk:
 
@@ -382,7 +373,7 @@ Then:
 sudo mkfs.ext4 /dev/vdb
 ```
 
-## 8.3 Mount point
+## 7.3 Mount point
 
 ```bash
 sudo mkdir -p /mnt/vmstore
@@ -395,7 +386,7 @@ Verify:
 df -h /mnt/vmstore
 ```
 
-## 8.4 Make the mount persistent
+## 7.4 Make the mount persistent
 
 Get the UUID:
 
@@ -421,7 +412,7 @@ A reboot should not be used as the first test of an unverified `fstab`.
 
 ---
 
-# 9. Nested VM Storage Pool
+# 8. Nested VM Storage Pool
 
 Directory structure:
 
@@ -429,7 +420,7 @@ Directory structure:
 /mnt/vmstore/
 ├── images/
 │   ├── web01.qcow2
-│   └── files01.qcow2
+│   └── db01.qcow2
 └── iso/
     └── ubuntu-24.04.x-live-server-amd64.iso
 ```
@@ -464,7 +455,7 @@ nested-vms   active   yes
 
 ---
 
-# 10. Ubuntu Server Installation as L1 Hypervisor
+# 9. Ubuntu Server Installation as L1 Hypervisor
 
 The Ubuntu Server VM (`redinext`) was installed on CatchyOS and then configured as a second KVM/libvirt host.
 
@@ -499,7 +490,7 @@ Initially use DHCP to validate installation/networking before applying static co
 
 ---
 
-# 11. Validate Nested KVM inside redinext
+# 10. Validate Nested KVM inside redinext
 
 This step is critical.
 
@@ -591,16 +582,16 @@ Always validate the entire virtualization layer before adding another layer of g
 
 ---
 
-# 12. L1 Network — redinext
+# 11. L1 Network — redinext
 
 The outer libvirt network became:
 
 ```text
-CatchyOS virbr0:
-    10.10.1.1/24
+CatchyOS virbr2:
+    10.10.10.1/24
 
 redinext:
-    10.10.1.10/24
+    10.10.10.10/24
 ```
 
 Inside `redinext`, verify:
@@ -613,13 +604,13 @@ ip route
 The upstream/default gateway should point toward:
 
 ```text
-10.10.1.1
+10.10.10.1
 ```
 
 Then validate:
 
 ```bash
-ping -c 3 10.10.1.1
+ping -c 3 10.10.10.1
 ping -c 3 8.8.8.8
 ping -c 3 google.com
 ```
@@ -632,20 +623,20 @@ These tests separate:
 
 ---
 
-# 13. Internal Network — redinext
+# 12. Internal Network — redinext
 
 The second libvirt network was changed to:
 
 ```text
-10.10.2.0/24
+10.10.10.0/24
 ```
 
 with:
 
 ```text
-redinext virbr0 = 10.10.2.1
-WEB01            = 10.10.2.10
-FILE01           = 10.10.2.202
+redinext br-lab = 10.10.10.10
+WEB01            = 10.10.10.20
+DB01           = 10.10.10.30
 ```
 
 Verify on redinext:
@@ -665,12 +656,12 @@ ip route
 Expected WEB01 gateway:
 
 ```text
-10.10.2.1
+10.10.10.20
 ```
 
 ---
 
-# 14. Create WEB01
+# 13 Create WEB01
 
 Example CLI provisioning:
 
@@ -708,7 +699,7 @@ For this lab, the installation was ultimately completed through the available VM
 
 ---
 
-# 15. Accessing Headless VMs
+# 14. Accessing Headless VMs
 
 For a running VM:
 
@@ -745,12 +736,12 @@ Once SSH is installed, **SSH is the preferred administration method**.
 Example:
 
 ```bash
-ssh dev@10.10.2.10
+ssh dev@10.10.10.20
 ```
 
 ---
 
-# 16. WEB01 Configuration
+# 15. WEB01 Configuration
 
 WEB01 was configured as an Ubuntu web server.
 
@@ -794,7 +785,7 @@ Server: nginx/1.18.0 (Ubuntu)
 
 ---
 
-# 17. Nginx 403 Troubleshooting
+# 16. Nginx 403 Troubleshooting
 
 A `403 Forbidden` was initially returned even though networking was working.
 
@@ -854,21 +845,21 @@ Do not restart routers or rewrite firewall rules when the application itself is 
 
 ---
 
-# 18. Testing the Network Layer by Layer
+# 17. Testing the Network Layer by Layer
 
 A reliable troubleshooting sequence was used repeatedly.
 
 ## Host → redinext
 
 ```bash
-ping -c 3 10.10.1.10
+ping -c 3 10.10.10.10
 ```
 
 ## redinext → WEB01
 
 ```bash
-ping -c 3 10.10.2.10
-curl -I http://10.10.2.10
+ping -c 3 10.10.10.10
+curl -I http://10.10.10.20
 ```
 
 ## WEB01 local service
@@ -907,7 +898,7 @@ The rule is:
 
 ---
 
-# 19. Two-Level NAT and Port Forwarding
+# 18. Two-Level NAT and Port Forwarding
 
 The current network has two NAT/router boundaries:
 
@@ -916,15 +907,15 @@ The current network has two NAT/router boundaries:
        │
        ▼
 CatchyOS
-10.10.1.1
+10.10.10.1
        │
        ▼
 redinext
-10.10.2.1
+10.10.10.10
        │
        ▼
 WEB01
-10.10.2.10
+10.10.10.20
 ```
 
 This means Internet/LAN exposure can require more than one forwarding stage.
@@ -937,9 +928,9 @@ LAN client
     ↓
 CatchyOS 192.168.0.119:8080
     ↓ DNAT
-redinext 10.10.1.10:8080
+redinext 10.10.10.10:8080
     ↓ DNAT
-WEB01 10.10.2.10:80
+WEB01 10.10.10.20:80
 ```
 
 The first DNAT was configured conceptually as:

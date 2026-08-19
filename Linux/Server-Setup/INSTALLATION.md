@@ -7,4 +7,6 @@
 
 1. KVM - (Kernel Based Virtual Machine) : supports to create virtual machines, on the linux based machines.
 2. QEMU - Quick Emulator : Provides hardware emulation(Hard disk, network cards, VGA, PCI, low-level interface to the virtual machine).
-3. Libvirt - Software suite that provides various tools to manage
+3. Libvirt - Software suite that provides various tools to manage VMs, includes API, daemon and virsh CLI utility.
+
+
