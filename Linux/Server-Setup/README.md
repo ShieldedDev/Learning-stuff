@@ -1,4 +1,4 @@
-# Redinext Linux Infrastructure Lab
+# Linux Infrastructure Lab
 
 > **A practical, enterprise-style Linux infrastructure lab using Ubuntu Server, KVM/QEMU, libvirt, Netplan, Linux bridges, SSH, Cockpit, and static networking.**
 
